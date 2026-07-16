@@ -1,0 +1,8 @@
+#!/bin/sh
+
+set -eu
+
+export USER="$(id -un)"
+export HOME="/home/${USER}"
+
+exec opencode "$@"

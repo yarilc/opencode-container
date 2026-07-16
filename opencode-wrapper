@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly OPENCODE_VERSION="${OPENCODE_VERSION:-1.18.3}"
+readonly USER_NAME="$(id -un)"
+readonly USER_ID="$(id -u)"
+readonly GROUP_ID="$(id -g)"
+readonly WORKSPACE="$(pwd -P)"
+readonly WORKSPACE_NAME="$(basename -- "${WORKSPACE}")"
+readonly RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${USER_ID}}"
+readonly PODMAN_SOCKET="${RUNTIME_DIR}/podman/podman.sock"
+readonly IMAGE="localhost/opencode-sandbox:${OPENCODE_VERSION}-${USER_NAME}-${USER_ID}-${GROUP_ID}"
+
+container_id=""
+
+cleanup() {
+    if [[ -n "${container_id}" ]]; then
+        podman rm --force "${container_id}" >/dev/null 2>&1 || true
+    fi
+}
+
+trap cleanup EXIT HUP INT TERM
+
+if ! command -v podman >/dev/null 2>&1; then
+    printf 'error: podman is required to run the OpenCode sandbox\n' >&2
+    exit 127
+fi
+
+if [[ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)" != "true" ]]; then
+    printf 'error: rootless Podman is required\n' >&2
+    exit 1
+fi
+
+sanitize_name() {
+    local value="$1"
+    value="${value//[^a-zA-Z0-9_.-]/-}"
+    value="${value##[-._]}"
+    value="${value%%[-._]}"
+    value="${value:-workspace}"
+    printf '%s' "${value}"
+}
+
+readonly NAME_PREFIX="$(sanitize_name "${WORKSPACE_NAME}")"
+
+xdg_path() {
+    local variable_name="$1"
+    local fallback="$2"
+    local value="${!variable_name:-}"
+    if [[ -n "${value}" ]]; then
+        printf '%s' "${value}/opencode"
+    else
+        printf '%s' "${HOME}/${fallback}/opencode"
+    fi
+}
+
+readonly CONFIG_DIR="$(xdg_path XDG_CONFIG_HOME .config)"
+readonly DATA_DIR="$(xdg_path XDG_DATA_HOME .local/share)"
+readonly CACHE_DIR="$(xdg_path XDG_CACHE_HOME .cache)"
+readonly STATE_DIR="$(xdg_path XDG_STATE_HOME .local/state)"
+
+mkdir -p -- "${CONFIG_DIR}" "${DATA_DIR}" "${CACHE_DIR}" "${STATE_DIR}"
+
+if ! podman image exists "${IMAGE}"; then
+    podman build \
+        --tag "${IMAGE}" \
+        --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
+        --build-arg "USER_NAME=${USER_NAME}" \
+        --build-arg "USER_ID=${USER_ID}" \
+        --build-arg "GROUP_ID=${GROUP_ID}" \
+        "${SCRIPT_DIR}"
+fi
+
+run_args=(
+    --rm
+    --read-only
+    --userns=keep-id
+    --user "${USER_ID}:${GROUP_ID}"
+    --cap-drop=all
+    --security-opt=no-new-privileges
+    --pids-limit=512
+    --tmpfs "/tmp:rw,nosuid,nodev,size=512m,mode=1777"
+    --mount "type=bind,src=${WORKSPACE},dst=${WORKSPACE}"
+    --mount "type=bind,src=${CONFIG_DIR},dst=${CONFIG_DIR}"
+    --mount "type=bind,src=${DATA_DIR},dst=${DATA_DIR}"
+    --mount "type=bind,src=${CACHE_DIR},dst=${CACHE_DIR}"
+    --mount "type=bind,src=${STATE_DIR},dst=${STATE_DIR}"
+    --env "HOME=${HOME}"
+    --env "USER=${USER_NAME}"
+    --env "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME}/.config}"
+    --env "XDG_DATA_HOME=${XDG_DATA_HOME:-${HOME}/.local/share}"
+    --env "XDG_CACHE_HOME=${XDG_CACHE_HOME:-${HOME}/.cache}"
+    --env "XDG_STATE_HOME=${XDG_STATE_HOME:-${HOME}/.local/state}"
+    --workdir "${WORKSPACE}"
+    --label io.opencode.managed=true
+    --label "io.opencode.workspace=${WORKSPACE}"
+    --label "io.opencode.workspace-name=${NAME_PREFIX}"
+)
+
+for readonly_path in "${HOME}/.claude" "${HOME}/.agents" "/etc/opencode"; do
+    if [[ -d "${readonly_path}" ]]; then
+        run_args+=(
+            --mount "type=bind,src=${readonly_path},dst=${readonly_path},ro"
+        )
+    fi
+done
+
+for variable_name in \
+    TERM COLORTERM LANG LC_ALL \
+    HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy \
+    OPENCODE_CONFIG OPENCODE_CONFIG_DIR OPENCODE_CONFIG_CONTENT \
+    OPENCODE_PERMISSION OPENCODE_SERVER_PASSWORD OPENCODE_SERVER_USERNAME \
+    OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_DEFAULT_PLUGINS \
+    OPENCODE_DISABLE_LSP_DOWNLOAD OPENCODE_DISABLE_MODELS_FETCH \
+    ANTHROPIC_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
+    GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY \
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION \
+    AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT \
+    GH_TOKEN GITHUB_TOKEN; do
+    if [[ -n "${!variable_name:-}" ]]; then
+        run_args+=(--env "${variable_name}=${!variable_name}")
+    fi
+done
+
+if [[ -S "${PODMAN_SOCKET}" && -r "${PODMAN_SOCKET}" && -w "${PODMAN_SOCKET}" ]]; then
+    run_args+=(
+        --mount "type=bind,src=${PODMAN_SOCKET},dst=${PODMAN_SOCKET}"
+        --security-opt=label=disable
+        --env "CONTAINER_HOST=unix://${PODMAN_SOCKET}"
+    )
+else
+    printf 'warning: Podman user socket not available at %s\n' "${PODMAN_SOCKET}" >&2
+    printf 'warning: OpenCode will start normally, but it will not be able to launch containers.\n' >&2
+    printf '\nEnable the socket for the current session:\n' >&2
+    printf '  systemctl --user start podman.socket\n' >&2
+    printf '\nEnable it now and automatically at login:\n' >&2
+    printf '  systemctl --user enable --now podman.socket\n\n' >&2
+fi
+
+if [[ -t 0 && -t 1 ]]; then
+    run_args+=(--interactive --tty)
+fi
+
+next_index=0
+while IFS= read -r existing_name; do
+    if [[ "${existing_name}" != "${NAME_PREFIX}-"* ]]; then
+        continue
+    fi
+
+    existing_index="${existing_name#"${NAME_PREFIX}-"}"
+    if [[ "${existing_index}" =~ ^[0-9]+$ ]] && (( existing_index >= next_index )); then
+        next_index=$((existing_index + 1))
+    fi
+done < <(podman ps --all --format '{{.Names}}')
+
+while :; do
+    candidate="${NAME_PREFIX}-${next_index}"
+    container_args=(
+        "${run_args[@]}"
+        --name "${candidate}"
+        --label "io.opencode.instance=${next_index}"
+    )
+
+    create_output=""
+    if create_output="$(podman create "${container_args[@]}" "${IMAGE}" "$@" 2>&1)"; then
+        container_id="${create_output}"
+        break
+    fi
+
+    if ! podman container exists "${candidate}"; then
+        printf '%s\n' "${create_output}" >&2
+        exit 1
+    fi
+
+    next_index=$((next_index + 1))
+done
+
+podman start --attach --interactive "${container_id}"

@@ -68,6 +68,8 @@ I container sono effimeri e vengono rimossi al termine della sessione.
 
 OpenCode si avvia anche senza il socket API Podman. In questo caso non potrà
 lanciare container secondari e il wrapper mostrerà i comandi per abilitarlo.
+L'immagine include `podman-remote` esposto anche come comando `podman`; il
+comando funziona solo quando il socket API è montato.
 
 Abilitazione solo per la sessione corrente:
 

@@ -1,137 +1,138 @@
 # OpenCode Sandbox
 
-Wrapper per eseguire OpenCode in un container Podman rootless, mantenendo
-workspace e configurazione persistenti tra le sessioni.
+Wrapper for running OpenCode in a rootless Podman container while preserving
+the workspace and configuration between sessions.
 
-## Prerequisiti
+## Prerequisites
 
-- Linux o WSL2
-- Podman rootless
-- `systemd --user` opzionale, solo per il socket API Podman
+- Linux or WSL2
+- Rootless Podman
+- `systemd --user` is optional and only needed for the Podman API socket
 
-Verifica il runtime:
+Verify the runtime:
 
 ```bash
 podman info --format '{{.Host.Security.Rootless}}'
 ```
 
-Il comando deve restituire `true`.
+The command must return `true`.
 
-## Installazione
+## Installation
 
-Rendi eseguibile il wrapper:
+Make the wrapper executable:
 
 ```bash
 chmod 0755 /mnt/d/Workspace/opencode-container/opencode-wrapper
 ```
 
-Aggiungi l'alias alla configurazione della shell:
+Add the alias to your shell configuration:
 
 ```bash
 alias opencode='/mnt/d/Workspace/opencode-container/opencode-wrapper'
 ```
 
-Ricarica la configurazione della shell oppure apri una nuova sessione.
+Reload the shell configuration or open a new session.
 
-## Utilizzo
+## Usage
 
-Il wrapper mantiene il comportamento normale di OpenCode:
+The wrapper preserves the normal OpenCode interface:
 
 ```bash
-cd /home/yari/Workspace/progetto
+cd /home/yari/Workspace/project
 opencode
 opencode --version
-opencode run "Descrivi questo progetto"
+opencode run "Describe this project"
 ```
 
-La prima esecuzione costruisce l'immagine. La versione predefinita è `1.18.3`
-ed è possibile sovrascriverla per una sessione:
+The first invocation builds the image. The default version is `1.18.3`; it can
+be overridden for one session:
 
 ```bash
 OPENCODE_VERSION=1.18.3 opencode --version
 ```
 
-## Nomi Dei Container
+## Container Names
 
-Il nome deriva dal basename del workspace:
+The name is derived from the workspace basename:
 
 ```text
-/home/yari/Workspace/progetto -> progetto-0
+/home/yari/Workspace/project -> project-0
 ```
 
-Le istanze successive usano l'indice massimo esistente più uno. Gli indici
-intermedi non vengono riutilizzati finché esiste un indice superiore.
+Later instances use the highest existing index plus one. Intermediate indices
+are not reused while a higher index exists.
 
-I container sono effimeri e vengono rimossi al termine della sessione.
+Containers are ephemeral and are removed when the session ends.
 
-## Socket Podman Opzionale
+## Optional Podman Socket
 
-OpenCode si avvia anche senza il socket API Podman. In questo caso non potrà
-lanciare container secondari e il wrapper mostrerà i comandi per abilitarlo.
-L'immagine include `podman-remote` esposto anche come comando `podman`; il
-comando funziona solo quando il socket API è montato.
+OpenCode starts normally without the Podman API socket. In that case it cannot
+launch nested containers, and the wrapper prints the commands needed to enable
+the socket.
 
-Abilitazione solo per la sessione corrente:
+The image includes `podman-remote`, exposed as the `podman` command. It works
+only when the API socket is mounted.
+
+Enable the socket for the current session:
 
 ```bash
 systemctl --user start podman.socket
 ```
 
-Abilitazione automatica all'accesso:
+Enable it now and automatically at login:
 
 ```bash
 systemctl --user enable --now podman.socket
 ```
 
-Il wrapper non esegue automaticamente questi comandi.
+The wrapper never runs these commands automatically.
 
-## Percorsi Montati
+## Mounted Paths
 
-In scrittura:
+Writable mounts:
 
-- workspace corrente;
+- current workspace;
 - `~/.config/opencode`;
 - `~/.local/share/opencode`;
 - `~/.cache/opencode`;
 - `~/.local/state/opencode`.
 
-In sola lettura, se presenti:
+Optional read-only mounts:
 
 - `~/.claude`;
 - `~/.agents`;
 - `/etc/opencode`.
 
-La home completa, `.ssh`, `.aws`, `.docker`, il `.gitconfig` globale e la
-configurazione Podman non vengono montati.
+The full home directory, `.ssh`, `.aws`, `.docker`, the global `.gitconfig`,
+and the user's Podman configuration are not mounted.
 
-## Sicurezza
+## Security
 
-Il container principale viene eseguito con:
+The main container runs with:
 
-- root filesystem read-only;
-- UID/GID dell'utente host;
-- user namespace `keep-id`;
-- tutte le capability rimosse;
+- a read-only root filesystem;
+- the host user's UID/GID;
+- the `keep-id` user namespace;
+- all capabilities dropped;
 - `no-new-privileges`;
-- `/tmp` temporaneo con `nosuid` e `nodev`; deve restare eseguibile perché
-  OpenTUI carica da qui una libreria condivisa all'avvio;
-- limite al numero di processi.
+- an ephemeral `/tmp` with `nosuid` and `nodev`; it must remain executable
+  because OpenTUI loads a shared library from there at startup;
+- a process limit.
 
-Il socket Podman rootless concede comunque a OpenCode il pieno controllo del
-Podman dell'utente. Un processo che usa volontariamente l'API può accedere ai
-percorsi host leggibili dall'utente. Per il massimo isolamento, non abilitare
-il socket.
+The rootless Podman socket still gives OpenCode full control over the user's
+Podman engine. A process deliberately using the API can access host paths that
+the user can read. For maximum isolation, do not enable the socket.
 
-## Aggiornamento
+## Updating
 
-La versione è fissata in `opencode-wrapper` tramite `OPENCODE_VERSION` e nel
-`Dockerfile` tramite `ARG OPENCODE_VERSION`.
+The version is defined in `opencode-wrapper` through `OPENCODE_VERSION` and in
+the `Dockerfile` through `ARG OPENCODE_VERSION`.
 
-Per aggiornare:
+To update:
 
-1. modifica entrambi i valori alla nuova versione;
-2. rimuovi o ricostruisci il tag immagine precedente;
-3. verifica `opencode --version`.
+1. Change both version values.
+2. Remove or rebuild the previous image tag.
+3. Verify `opencode --version`.
 
-Non usare `opencode upgrade` dentro il container: il filesystem principale è
-immutabile.
+Do not run `opencode upgrade` inside the container: the main filesystem is
+immutable.

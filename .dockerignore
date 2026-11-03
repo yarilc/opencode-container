@@ -1,45 +1,5 @@
-# Version-control metadata
-.git
-.gitignore
-
-# OpenCode configuration and persistent data
-.opencode
-opencode.json
-opencode.jsonc
-config.json
-config.jsonc
-auth.json
-
-# User and provider credentials
-.env
-.env.*
-.ssh
-.aws
-.docker
-
-# Local caches and generated files
-.cache
-.local
-node_modules
-dist
-build
-coverage
-tmp
-temp
-
-# Editor and operating-system files
-.idea
-.vscode
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# Container artifacts
-Dockerfile.*
-Containerfile*
-docker-compose*.yml
-docker-compose*.yaml
-*.tar
-*.tar.gz
+# Only deliberate root image inputs are sent to Podman.
+**
+!/Dockerfile
+!/opencode-entrypoint
+!/.dockerignore

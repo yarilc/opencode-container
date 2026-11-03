@@ -2,109 +2,213 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+usage() {
+    cat <<'EOF'
+Usage: opencode-wrapper [container options] [OpenCode arguments...]
+
+  --container-build         refresh the per-user image, then start the session
+  --container-shell         open Bash without OpenCode arguments
+  --container-git-worktree  mount the physical current directory's parent read/write
+  --container-help          show this help without tools or filesystem changes
+
+Other arguments, including --help, are passed unchanged to OpenCode.
+Worktree mode exposes the entire parent beyond the workspace, retaining workdir.
+Linux rootless Podman and host GNU coreutils timeout are required.
+See README.md for engine, private XDG state, delegation and cleanup contracts.
+EOF
+}
+
+build_image=0
+shell_mode=0
+git_worktree=0
+agent_args=()
+for arg in "$@"; do
+    case "$arg" in
+        --container-help) usage; exit 0 ;;
+        --container-build) build_image=1 ;;
+        --container-shell) shell_mode=1 ;;
+        --container-git-worktree) git_worktree=1 ;;
+        *) agent_args+=("$arg") ;;
+    esac
+done
+
+SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
+SCRIPT_DIR=$(dirname -- "$SCRIPT_PATH")
+readonly SCRIPT_PATH SCRIPT_DIR
 readonly OPENCODE_VERSION="${OPENCODE_VERSION:-1.18.3}"
-readonly USER_NAME="$(id -un)"
-readonly USER_ID="$(id -u)"
-readonly GROUP_ID="$(id -g)"
-readonly WORKSPACE="$(pwd -P)"
-readonly WORKSPACE_NAME="$(basename -- "${WORKSPACE}")"
+USER_NAME="$(id -un)"
+readonly USER_NAME
+USER_ID="$(id -u)"
+readonly USER_ID
+GROUP_ID="$(id -g)"
+readonly GROUP_ID
+WORKSPACE="$(pwd -P)"
+readonly WORKSPACE
+WORKSPACE_NAME="$(basename -- "${WORKSPACE}")"
+readonly WORKSPACE_NAME
 readonly RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${USER_ID}}"
 readonly PODMAN_SOCKET="${RUNTIME_DIR}/podman/podman.sock"
 readonly IMAGE="localhost/opencode-sandbox:${OPENCODE_VERSION}-${USER_NAME}-${USER_ID}-${GROUP_ID}"
-
-container_id=""
-
-cleanup() {
-    if [[ -n "${container_id}" ]]; then
-        podman rm --force "${container_id}" >/dev/null 2>&1 || true
-    fi
-}
-
-trap cleanup EXIT HUP INT TERM
 
 if ! command -v podman >/dev/null 2>&1; then
     printf 'error: podman is required to run the OpenCode sandbox\n' >&2
     exit 127
 fi
 
-if [[ "$(podman info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)" != "true" ]]; then
-    printf 'error: rootless Podman is required\n' >&2
-    exit 1
+die() { printf 'opencode-wrapper: %s\n' "$*" >&2; exit 1; }
+command -v timeout >/dev/null && [[ $(timeout --version) == *'GNU coreutils'* ]] \
+    || die 'host GNU coreutils timeout is required'
+
+# Preserve all output bytes representable in Bash, including trailing records,
+# without replacing a failed query status with the sentinel printf status.
+capture_response() {
+    local destination=$1 captured query_status
+    shift
+    if captured=$("$@"; query_status=$?; printf '\034'; exit "$query_status"); then
+        printf -v "$destination" '%s' "${captured%$'\034'}"
+    else
+        return "$?"
+    fi
+}
+[[ -z "${CONTAINER_CONNECTION:-}" ]] || die 'named Podman connections are unsupported'
+case "${CONTAINER_HOST:-}" in
+    '') ;;
+    unix://*)
+        launch_socket=${CONTAINER_HOST#unix://}
+        [[ "$launch_socket" == /* && -n "${launch_socket//\//}" ]] \
+            || die 'CONTAINER_HOST requires an absolute Unix socket pathname beyond slashes'
+        ;;
+    *) die 'use local Podman or an explicit same-host Unix CONTAINER_HOST; TCP/SSH is unsupported' ;;
+esac
+capture_response engine_response podman info --format '{{.Host.Security.Rootless}} {{.Host.OS}} {{.Host.ServiceIsRemote}}' \
+    || die 'cannot query launch engine'
+engine_response=${engine_response%$'\n'}
+[[ "$engine_response" != *$'\n'* && "$engine_response" != *$'\r'* ]] || die 'invalid launch engine records'
+launch_pattern='^[[:blank:]]*true[[:blank:]]+linux[[:blank:]]+(true|false)[[:blank:]]*$'
+[[ "$engine_response" =~ $launch_pattern ]] || die 'a complete Linux rootless engine response is required'
+[[ "${BASH_REMATCH[1]}" == false || "${CONTAINER_HOST:-}" == unix:///* ]] \
+    || die 'remote launch engine requires explicit same-host Unix CONTAINER_HOST'
+
+delegate=0
+if [[ "${OPENCODE_CONTAINER_PODMAN:-}" == 1 ]]; then
+    delegate=1
+    socket=${OPENCODE_CONTAINER_PODMAN_SOCKET:-}
+    if [[ -z "$socket" && "${CONTAINER_HOST:-}" == unix:///* ]]; then
+        socket=${CONTAINER_HOST#unix://}
+    fi
+    socket=${socket:-$PODMAN_SOCKET}
+    [[ "$socket" == /* && -n "${socket//\//}" ]] || die 'Podman socket override must be absolute'
+    socket=$(readlink -f -- "$socket") || die 'cannot resolve selected Podman socket'
+    [[ -S "$socket" && -r "$socket" && -w "$socket" ]] \
+        || die "Podman socket inaccessible: $socket; manually run systemctl --user start podman.socket or podman system service --time=0; check permissions and SELinux policy"
+    capture_response socket_response podman --remote --url "unix://$socket" info \
+        --format '{{.Host.Security.Rootless}}{{"\n"}}{{.Host.RemoteSocket.Path}}' \
+        || die 'cannot query selected Podman socket; check service, permissions and SELinux policy'
+    socket_response=${socket_response%$'\n'}
+    [[ "$socket_response" != *$'\r'* && "$socket_response" == true$'\n'/* ]] \
+        || die 'invalid rootless socket response'
+    host_socket=${socket_response#*$'\n'}
+    [[ "$host_socket" != *$'\n'* && -n "${host_socket//\//}" ]] \
+        || die 'socket must report one absolute host pathname beyond slashes'
 fi
 
 sanitize_name() {
     local value="$1"
     value="${value//[^a-zA-Z0-9_.-]/-}"
-    value="${value##[-._]}"
-    value="${value%%[-._]}"
+    while [[ "$value" == [-._]* ]]; do value=${value:1}; done
+    while [[ "$value" == *[-._] ]]; do value=${value:0:-1}; done
     value="${value:-workspace}"
     printf '%s' "${value}"
 }
 
-readonly NAME_PREFIX="$(sanitize_name "${WORKSPACE_NAME}")"
+NAME_PREFIX="$(sanitize_name "${WORKSPACE_NAME}")"
+readonly NAME_PREFIX
 
-xdg_path() {
-    local variable_name="$1"
-    local fallback="$2"
-    local value="${!variable_name:-}"
-    if [[ -n "${value}" ]]; then
-        printf '%s' "${value}/opencode"
-    else
-        printf '%s' "${HOME}/${fallback}/opencode"
-    fi
+# Validate all paths and mount destinations before state-dependent engine calls.
+valid_bind_path() {
+    [[ "$1" == /* && "$1" != *:* && "$1" != *$'\n'* && "$1" != *$'\r'* ]] \
+        || die "bind paths must be absolute and contain no colon, CR or LF: $1"
 }
+[[ "${HOME:-}" == /* ]] || die 'HOME must be absolute'
+workspace_mount=$WORKSPACE
+((git_worktree == 0)) || workspace_mount=$(dirname -- "$WORKSPACE")
+mount_args=()
+mount_sources=()
+mount_destinations=()
+mount_modes=()
+add_bind() {
+    local source=$1 destination=$2 access=$3 index previous
+    valid_bind_path "$source"
+    valid_bind_path "$destination"
+    # A bind may live below an ephemeral mount, but must never shadow it.
+    for previous in /tmp /var/tmp /run; do
+        [[ "$previous/" != "$destination/"* ]] || die "bind shadows temporary storage: $destination"
+    done
+    for index in "${!mount_destinations[@]}"; do
+        previous=${mount_destinations[index]}
+        if [[ "$previous" == "$destination" && "${mount_sources[index]}" == "$source" && "${mount_modes[index]}" == "$access" ]]; then
+            return
+        fi
+        [[ "$previous/" != "$destination/"* && "$destination/" != "$previous/"* ]] \
+            || die "conflicting mount destinations: $previous and $destination"
+    done
+    mount_sources+=("$source")
+    mount_destinations+=("$destination")
+    mount_modes+=("$access")
+    mount_args+=(--volume "$source:$destination:$access")
+}
+add_bind "$workspace_mount" "$workspace_mount" rw
+xdg_args=()
+private_xdg() {
+    local variable=$1 fallback=$2 base path resolved owner mode destination
+    base=${!variable:-$HOME/$fallback}
+    [[ "$base" == /* ]] || die "$variable must be absolute: $base"
+    path=${base%/}/opencode
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        (umask 077; mkdir -p -- "$path") || die "cannot create private state: $path"
+    fi
+    [[ -d "$path" ]] || die "state is not a directory: $path"
+    resolved=$(cd -- "$path" && pwd -P) || die "cannot resolve state: $path"
+    [[ -r "$resolved" && -w "$resolved" && -x "$resolved" ]] || die "state is not accessible: $path"
+    owner=$(stat -c '%u' -- "$resolved") || die "cannot inspect state owner: $path"
+    mode=$(stat -c '%a' -- "$resolved") || die "cannot inspect state mode: $path"
+    [[ "$owner" == "$USER_ID" ]] || die "state must belong to caller: $path"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "invalid state mode: $path"
+    (( (8#$mode & 077) == 0 )) || die "state must be private: $path; correct permissions manually or choose native Linux storage"
+    base=$(dirname -- "$resolved")
+    destination=${base%/}/opencode
+    add_bind "$resolved" "$destination" rw
+    xdg_args+=(--env "$variable=$base")
+}
+private_xdg XDG_CONFIG_HOME .config
+private_xdg XDG_DATA_HOME .local/share
+private_xdg XDG_CACHE_HOME .cache
+private_xdg XDG_STATE_HOME .local/state
 
-readonly CONFIG_DIR="$(xdg_path XDG_CONFIG_HOME .config)"
-readonly DATA_DIR="$(xdg_path XDG_DATA_HOME .local/share)"
-readonly CACHE_DIR="$(xdg_path XDG_CACHE_HOME .cache)"
-readonly STATE_DIR="$(xdg_path XDG_STATE_HOME .local/state)"
-
-mkdir -p -- "${CONFIG_DIR}" "${DATA_DIR}" "${CACHE_DIR}" "${STATE_DIR}"
-
-if ! podman image exists "${IMAGE}"; then
-    podman build \
-        --tag "${IMAGE}" \
-        --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
-        --build-arg "USER_NAME=${USER_NAME}" \
-        --build-arg "USER_ID=${USER_ID}" \
-        --build-arg "GROUP_ID=${GROUP_ID}" \
-        "${SCRIPT_DIR}"
+for readonly_path in "${HOME}/.claude" "${HOME}/.agents" /etc/opencode; do
+    if [[ -d "$readonly_path" ]]; then
+        readonly_source=$(cd -- "$readonly_path" && pwd -P) || die "cannot resolve integration: $readonly_path"
+        add_bind "$readonly_source" "$readonly_path" ro
+    fi
+done
+if ((delegate)); then
+    add_bind "$host_socket" /run/podman/podman.sock rw
 fi
 
 run_args=(
-    --rm
-    --read-only
-    --userns=keep-id
-    --user "${USER_ID}:${GROUP_ID}"
-    --cap-drop=all
-    --security-opt=no-new-privileges
-    --pids-limit=512
-    --tmpfs "/tmp:rw,nosuid,nodev,size=512m,mode=1777"
-    --mount "type=bind,src=${WORKSPACE},dst=${WORKSPACE}"
-    --mount "type=bind,src=${CONFIG_DIR},dst=${CONFIG_DIR}"
-    --mount "type=bind,src=${DATA_DIR},dst=${DATA_DIR}"
-    --mount "type=bind,src=${CACHE_DIR},dst=${CACHE_DIR}"
-    --mount "type=bind,src=${STATE_DIR},dst=${STATE_DIR}"
-    --env "HOME=${HOME}"
-    --env "USER=${USER_NAME}"
-    --env "XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME}/.config}"
-    --env "XDG_DATA_HOME=${XDG_DATA_HOME:-${HOME}/.local/share}"
-    --env "XDG_CACHE_HOME=${XDG_CACHE_HOME:-${HOME}/.cache}"
-    --env "XDG_STATE_HOME=${XDG_STATE_HOME:-${HOME}/.local/state}"
-    --workdir "${WORKSPACE}"
+    --rm --interactive --read-only --read-only-tmpfs=false
+    --userns=keep-id --user "$USER_ID:$GROUP_ID"
+    --cap-drop=all --security-opt=no-new-privileges --pids-limit=512
+    --tmpfs "/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m"
+    --tmpfs "/run:rw,nosuid,nodev,noexec,mode=1777,size=32m"
+    --tmpfs "/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m"
+    "${mount_args[@]}" "${xdg_args[@]}"
+    --env "HOME=$HOME" --env "USER=$USER_NAME"
+    --workdir "$WORKSPACE"
     --label io.opencode.managed=true
-    --label "io.opencode.workspace=${WORKSPACE}"
-    --label "io.opencode.workspace-name=${NAME_PREFIX}"
+    --label "io.opencode.workspace=$WORKSPACE"
+    --label "io.opencode.workspace-name=$NAME_PREFIX"
 )
-
-for readonly_path in "${HOME}/.claude" "${HOME}/.agents" "/etc/opencode"; do
-    if [[ -d "${readonly_path}" ]]; then
-        run_args+=(
-            --mount "type=bind,src=${readonly_path},dst=${readonly_path},ro"
-        )
-    fi
-done
 
 for variable_name in \
     TERM COLORTERM LANG LC_ALL \
@@ -119,61 +223,236 @@ for variable_name in \
     AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT \
     GH_TOKEN GITHUB_TOKEN; do
     if [[ -n "${!variable_name:-}" ]]; then
-        run_args+=(--env "${variable_name}=${!variable_name}")
+        run_args+=(--env "$variable_name")
     fi
 done
 
-if [[ -S "${PODMAN_SOCKET}" && -r "${PODMAN_SOCKET}" && -w "${PODMAN_SOCKET}" ]]; then
+if ((delegate)); then
     run_args+=(
-        --mount "type=bind,src=${PODMAN_SOCKET},dst=${PODMAN_SOCKET}"
-        --security-opt=label=disable
-        --env "CONTAINER_HOST=unix://${PODMAN_SOCKET}"
+        --env CONTAINER_HOST=unix:///run/podman/podman.sock
     )
 else
-    printf 'warning: Podman user socket not available at %s\n' "${PODMAN_SOCKET}" >&2
-    printf 'warning: OpenCode will start normally, but it will not be able to launch containers.\n' >&2
-    printf '\nEnable the socket for the current session:\n' >&2
-    printf '  systemctl --user start podman.socket\n' >&2
-    printf '\nEnable it now and automatically at login:\n' >&2
-    printf '  systemctl --user enable --now podman.socket\n\n' >&2
+    run_args+=(--unsetenv CONTAINER_HOST)
 fi
 
 if [[ -t 0 && -t 1 ]]; then
-    run_args+=(--interactive --tty)
+    run_args+=(--tty)
 fi
 
+if ((shell_mode)); then
+    run_args+=(--entrypoint /bin/bash)
+    agent_args=()
+fi
+
+build_current_image() {
+    podman build --tag "$IMAGE" --file "$SCRIPT_DIR/Dockerfile" \
+        --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+        --build-arg "USER_NAME=$USER_NAME" --build-arg "USER_ID=$USER_ID" \
+        --build-arg "GROUP_ID=$GROUP_ID" "$SCRIPT_DIR"
+}
+if ((build_image)); then
+    build_current_image
+elif podman image exists "$IMAGE"; then
+    :
+else
+    image_status=$?
+    if ((image_status != 1)); then
+        printf 'opencode-wrapper: cannot inspect image %s (status %s)\n' "$IMAGE" "$image_status" >&2
+        exit "$image_status"
+    fi
+    build_current_image
+fi
+
+# Lifecycle state belongs exclusively to this invocation.
+container_id=''
+create_pid=''
+client_pid=''
+session_dir=''
+session_token=''
+creation_pending=0
+shutdown_deadline=0
+ownership_label=io.opencode.session
+
+cleanup_warning() {
+    printf 'opencode-wrapper: cleanup %s (container=%s session=%s); inspect the engine explicitly\n' \
+        "$*" "${container_id:-unknown}" "${session_token:-unknown}" >&2
+}
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup or indirect capture.
+control() {
+    local remaining=$((shutdown_deadline - SECONDS - 3)) duration status
+    ((remaining >= 2)) || { cleanup_warning "deadline exhausted before $1"; return 124; }
+    duration=$((remaining - 1))
+    ((duration <= 2)) || duration=2
+    if timeout --kill-after=1s "${duration}s" podman "$@"; then
+        return 0
+    else
+        status=$?
+        cleanup_warning "$1 failed or timed out (status $status)"
+        return "$status"
+    fi
+}
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup or indirect capture.
+child_running() {
+    local child=$1 running
+    [[ -n "$child" ]] || return 1
+    while IFS= read -r running; do
+        [[ "$running" != "$child" ]] || return 0
+    done < <(jobs -pr)
+    return 1
+}
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup or indirect capture.
+reap_client() {
+    local child=$1 until
+    [[ -n "$child" ]] || return 0
+    if child_running "$child"; then
+        kill -TERM "$child" 2>/dev/null || true
+        until=$((SECONDS + 1))
+        while child_running "$child" && ((SECONDS < until && SECONDS < shutdown_deadline - 1)); do sleep 0.05; done
+        child_running "$child" && kill -KILL "$child" 2>/dev/null
+    fi
+    while child_running "$child" && ((SECONDS < shutdown_deadline)); do sleep 0.05; done
+    if child_running "$child"; then
+        cleanup_warning "client $child could not be reaped within deadline"
+    else
+        wait "$child" 2>/dev/null || true
+    fi
+}
+# Read exact record boundaries, rejecting NUL and additional final LF bytes.
+read_cid() {
+    local file=$1 candidate='' has_nul=0
+    [[ -s "$file" ]] || return 1
+    IFS= read -r -d '' candidate < "$file" && has_nul=1
+    candidate=${candidate%$'\n'}
+    ((has_nul == 0)) && [[ "$candidate" =~ ^[a-f0-9]{64}$ ]] || return 1
+    printf '%s' "$candidate"
+}
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup or indirect capture.
+recover_container() {
+    local candidate='' owner=''
+    [[ -z "$container_id" && "$creation_pending" == 1 ]] || return 0
+    candidate=$(read_cid "$cid_file") || candidate=''
+    if [[ -z "$candidate" ]]; then
+        # Only label-selected IDs can recover a missing/delayed creation record.
+        capture_response candidate control ps --all --no-trunc --filter "label=$ownership_label=$session_token" --format '{{.ID}}' || return 1
+        candidate=${candidate%$'\n'}
+    fi
+    [[ -n "$candidate" ]] || return 0
+    [[ "$candidate" =~ ^[a-f0-9]{64}$ ]] || { cleanup_warning 'invalid or multiple recovered IDs'; return 1; }
+    capture_response owner control inspect --type container --format "{{index .Config.Labels \"$ownership_label\"}}" "$candidate" || return 1
+    owner=${owner%$'\n'}
+    if [[ "$owner" == "$session_token" ]]; then
+        container_id=$candidate
+    else
+        cleanup_warning 'recovered identity ownership mismatch'
+        return 1
+    fi
+}
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup or indirect capture.
+shutdown() {
+    local primary_status=$1 signal=${2:-} graceful_until create_until
+    trap - EXIT
+    trap '' TERM INT HUP
+    set +e
+    shutdown_deadline=$((SECONDS + 20))
+    if [[ -n "$session_dir" ]]; then
+        if ((creation_pending)); then
+            create_until=$((SECONDS + 1))
+            while child_running "$create_pid" && ((SECONDS < create_until)); do sleep 0.05; done
+        fi
+        recover_container
+        if [[ -n "$signal" && -n "$container_id" && -n "$client_pid" ]]; then
+            if control kill --signal "$signal" "$container_id" >/dev/null; then
+                graceful_until=$((SECONDS + 5))
+                while child_running "$client_pid" && ((SECONDS < graceful_until && SECONDS < shutdown_deadline - 8)); do sleep 0.05; done
+            else
+                cleanup_warning "cannot forward $signal"
+            fi
+        fi
+        if [[ -n "$container_id" ]]; then
+            control rm --force --ignore --time 0 "$container_id" >/dev/null || cleanup_warning 'cannot remove owned container'
+        fi
+        reap_client "$create_pid"
+        reap_client "$client_pid"
+        if ((creation_pending)) && [[ -z "$container_id" ]]; then
+            recover_container
+            if [[ -n "$container_id" ]]; then
+                control rm --force --ignore --time 0 "$container_id" >/dev/null || cleanup_warning 'cannot remove recovered owned container'
+            else
+                cleanup_warning 'creation outcome unresolved; client cancellation does not prove request cancellation'
+            fi
+        fi
+        rm -rf -- "$session_dir"
+    fi
+    exit "$primary_status"
+}
+trap 'shutdown "$?"' EXIT
+trap 'shutdown 143 TERM' TERM
+trap 'shutdown 130 INT' INT
+trap 'shutdown 129 HUP' HUP
+session_dir=$(umask 077; mktemp -d) || die 'cannot create private session records'
+session_token=${session_dir##*/}
+cid_file=$session_dir/cid
+create_output=$session_dir/output
+create_error=$session_dir/error
+(umask 077; : > "$create_output"; : > "$create_error")
+
+# Listing and collision queries are tracked clients too, so signals can cancel them.
+creation_lookup() {
+    local lookup_status=0
+    podman "$@" </dev/null > "$session_dir/lookup" &
+    create_pid=$!
+    wait "$create_pid" || lookup_status=$?
+    create_pid=''
+    return "$lookup_status"
+}
+creation_lookup ps --all --format '{{.Names}}' || die 'cannot list container names'
+names=$(<"$session_dir/lookup")
 next_index=0
 while IFS= read -r existing_name; do
-    if [[ "${existing_name}" != "${NAME_PREFIX}-"* ]]; then
-        continue
-    fi
-
-    existing_index="${existing_name#"${NAME_PREFIX}-"}"
-    if [[ "${existing_index}" =~ ^[0-9]+$ ]] && (( existing_index >= next_index )); then
-        next_index=$((existing_index + 1))
-    fi
-done < <(podman ps --all --format '{{.Names}}')
-
-while :; do
-    candidate="${NAME_PREFIX}-${next_index}"
-    container_args=(
-        "${run_args[@]}"
-        --name "${candidate}"
-        --label "io.opencode.instance=${next_index}"
-    )
-
-    create_output=""
-    if create_output="$(podman create "${container_args[@]}" "${IMAGE}" "$@" 2>&1)"; then
-        container_id="${create_output}"
+    [[ "$existing_name" == "$NAME_PREFIX-"* ]] || continue
+    suffix=${existing_name#"$NAME_PREFIX-"}
+    [[ "$suffix" =~ ^[0-9]{1,9}$ ]] || continue
+    numeric=$((10#$suffix))
+    ((numeric < next_index)) || next_index=$((numeric + 1))
+done <<< "$names"
+for ((attempt=0; attempt<20; attempt++)); do
+    name=$NAME_PREFIX-$next_index
+    rm -f -- "$cid_file"
+    creation_pending=1
+    (umask 077; exec podman create --name "$name" --cidfile "$cid_file" \
+        --label "$ownership_label=$session_token" --label "io.opencode.instance=$next_index" \
+        "${run_args[@]}" "$IMAGE" "${agent_args[@]}" </dev/null >"$create_output" 2>"$create_error") &
+    create_pid=$!
+    create_status=0
+    wait "$create_pid" || create_status=$?
+    create_pid=''
+    cat -- "$create_error" >&2
+    if ((create_status == 0)); then
+        container_id=$(read_cid "$cid_file") || die 'invalid or missing private creation ID'
+        stdout_id=$(read_cid "$create_output") || stdout_id=''
+        if [[ -n "$stdout_id" && "$stdout_id" != "$container_id" ]]; then
+            die 'inconsistent creation IDs'
+        fi
+        creation_pending=0
         break
     fi
-
-    if ! podman container exists "${candidate}"; then
-        printf '%s\n' "${create_output}" >&2
-        exit 1
+    # A returned ID on a failed request is reconciled by ownership during EXIT.
+    if [[ -s "$cid_file" || -s "$create_output" ]]; then
+        exit "$create_status"
     fi
-
-    next_index=$((next_index + 1))
+    exists_status=0
+    creation_lookup container exists "$name" || exists_status=$?
+    case "$exists_status" in
+        0) creation_pending=0; next_index=$((next_index + 1)) ;;
+        1) creation_pending=0; exit "$create_status" ;;
+        *) creation_pending=0; cleanup_warning "cannot confirm name collision (status $exists_status)"; exit "$create_status" ;;
+    esac
 done
-
-podman start --attach --interactive "${container_id}"
+[[ -n "$container_id" ]] || die 'cannot reserve container name after 20 confirmed collisions'
+# Explicit redirection keeps Bash from replacing background-client stdin.
+podman start --attach --interactive --sig-proxy=false "$container_id" <&0 &
+client_pid=$!
+status=0
+wait "$client_pid" || status=$?
+client_pid=''
+exit "$status"

@@ -2,7 +2,8 @@
 
 set -eu
 
-export USER="$(id -un)"
-export HOME="/home/${USER}"
+USER=$(id -un)
+export USER
+export HOME="${HOME:-/home/${USER}}"
 
 exec opencode "$@"

@@ -1,3 +1,4 @@
 .test-state/
 __pycache__/
 *.py[cod]
+.agents

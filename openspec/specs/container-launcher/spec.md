@@ -18,7 +18,7 @@ The wrapper SHALL consume only `--container-build`, `--container-shell`, `--cont
 - **THEN** they reach OpenCode with their original boundaries and order after wrapper controls are removed
 
 ### Requirement: Explicit image refresh and error handling
-`--container-build` SHALL build or refresh the per-user image before starting the selected session. Ordinary startup SHALL build only when image inspection returns missing-image status 1 and MUST stop on every other inspection error. All modes except help MUST apply engine, enabled delegation, and state preflights before image operations.
+`--container-build` SHALL build or refresh the selected image before starting the selected session. Ordinary startup SHALL build only when image inspection returns missing-image status 1 and MUST stop on every other inspection error. All modes except help MUST apply engine, enabled delegation, and state preflights before image operations.
 
 #### Scenario: Unexpected inspection failure
 - **WHEN** image inspection fails with an engine/storage status other than 1
@@ -28,22 +28,6 @@ The wrapper SHALL consume only `--container-build`, `--container-shell`, `--cont
 - **WHEN** the image is missing or `--container-build` is requested
 - **THEN** a successful preflight is followed by a build from the wrapper's physical recipe directory and then the requested OpenCode or shell session
 - **AND** build failure prevents session creation
-
-### Requirement: Per-user versioned image identity
-Default image tags SHALL retain OpenCode version, username, UID, and GID. The default version MUST remain `1.18.3` and equal the recipe's default `OPENCODE_VERSION` build argument. `OPENCODE_CONTAINER_VERSION` SHALL override the version, and the deprecated `OPENCODE_VERSION` SHALL remain a warned fallback. Invalid versions SHALL stop before engine queries. The image MUST provide the host user's username and numeric identity.
-
-#### Scenario: Default and overridden versions
-- **WHEN** the version is unset or explicitly overridden with `OPENCODE_CONTAINER_VERSION`
-- **THEN** the selected tag and build arguments use the corresponding version and host username/UID/GID without changing the default
-
-#### Scenario: Deprecated version variable
-- **WHEN** only `OPENCODE_VERSION=1.18.3` is set
-- **THEN** the wrapper prints a stderr deprecation warning and uses that version
-- **AND** when both variables are set, `OPENCODE_CONTAINER_VERSION` wins
-
-#### Scenario: Invalid version
-- **WHEN** the selected version is empty or does not match `[A-Za-z0-9][A-Za-z0-9._-]*`, for example because it contains `/`, `:` or whitespace
-- **THEN** the wrapper exits with status 1 naming the variable before any engine query
 
 ### Requirement: Shell mode
 `--container-shell` SHALL bypass the OpenCode entrypoint and start `/bin/bash` without OpenCode arguments. It MUST retain the same state, mount, identity, environment, delegation, lifecycle, and preflight contracts as a normal session.
@@ -59,13 +43,6 @@ Default image tags SHALL retain OpenCode version, username, UID, and GID. The de
 - **WHEN** worktree mode is requested from a symlinked working directory
 - **THEN** the physical directory's immediate parent is mounted and the session starts in the original physical directory
 - **AND** workspace naming continues to use that original directory's basename
-
-### Requirement: Default-deny build context
-The effective Podman build context MUST allow only the root `Containerfile`, root `opencode-entrypoint`, and root `.containerignore`. Unknown files, nested lookalikes, repository metadata, local state, and credentials MUST be excluded while the required COPY input remains available.
-
-#### Scenario: Probe context contents
-- **WHEN** a disposable build context includes the required entrypoint plus unknown root files, nested recipe/helper names, and synthetic credentials
-- **THEN** the entrypoint COPY succeeds and attempts to consume any unlisted input fail
 
 ### Requirement: Common entry point with deprecated shim
 The wrapper SHALL be `opencode-container.sh` at the repository root. `opencode-wrapper` SHALL remain as a deprecated shim: it prints one stderr warning naming the new script, then replaces itself with it, passing all arguments unchanged and preserving stdin, the exit status and signal handling. The shim SHALL work when invoked through a symlink or alias. Wrapper diagnostics SHALL use the `opencode-container:` prefix.
@@ -104,8 +81,19 @@ The wrapper SHALL be `opencode-container.sh` at the repository root. `opencode-w
 - **THEN** the wrapper exits with status 1 explaining that the two cannot be combined, before any engine query
 
 ### Requirement: Image name override
-`OPENCODE_CONTAINER_IMAGE` SHALL select the image used for inspection, build and session creation. When it is unset or empty, the wrapper SHALL use the per-user versioned tag. A value containing whitespace or control characters SHALL stop with status 1 before engine queries.
+`OPENCODE_CONTAINER_IMAGE` SHALL select the image used for inspection, build and session creation. When it is unset or empty, the wrapper SHALL use `localhost/opencode-cli:latest`. A value containing whitespace or control characters SHALL stop with status 1 before engine queries.
+
+#### Scenario: Default image
+- **WHEN** `OPENCODE_CONTAINER_IMAGE` is unset
+- **THEN** the wrapper inspects, builds when missing and runs `localhost/opencode-cli:latest`, passing no user identity build arguments
 
 #### Scenario: Custom image name
 - **WHEN** `OPENCODE_CONTAINER_IMAGE=localhost/opencode-custom:test` is set and the image is missing
 - **THEN** the wrapper inspects, builds and runs exactly that name
+
+### Requirement: Ignored version variables
+When `OPENCODE_CONTAINER_VERSION` or `OPENCODE_VERSION` is set, the wrapper SHALL print one stderr warning that the variable is ignored and that the version is pinned in `Containerfile`, and SHALL continue with the selected image.
+
+#### Scenario: Legacy version variable set
+- **WHEN** `OPENCODE_VERSION=1.17.0` is set
+- **THEN** stderr contains one warning naming the variable, the build passes no version argument, and the session starts normally

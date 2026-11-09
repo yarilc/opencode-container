@@ -1,5 +1,5 @@
-# Only deliberate root image inputs are sent to Podman.
+# Only deliberate root image inputs are sent to Podman; the image needs no
+# local COPY/ADD inputs.
 **
 !/Containerfile
-!/opencode-entrypoint
 !/.containerignore

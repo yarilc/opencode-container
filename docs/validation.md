@@ -264,3 +264,84 @@ README and `AGENTS.md` were reorganized into the common section structure. Every
 statement of the previous files was checked against the new text with a
 sentence-level comparison. The remaining differences are retitled sections,
 statements moved into tables, and the intended renames.
+
+## Runtime image and session baseline (A03, A04, A05, A11): 2026-11-09
+
+Change `align-runtime-image` (Wave 2). Host: rootless Podman 4.9.3 server.
+The new image `localhost/opencode-cli:latest` (`e606ff13a67e`) was built with
+`--no-cache` from `Containerfile`. The runner image is
+`localhost/claude-code:latest` (`7cd81e8ccd06`). No credentials, provider login
+or model requests were used.
+
+Pinned inputs:
+- base `docker.io/library/node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da`;
+- `opencode-ai@1.18.3`;
+- `@fission-ai/openspec@1.16.0`.
+
+npm channel facts:
+- `npm view opencode-ai@1.18.3` reports a registry SHA-512 integrity and
+  exact-version optional platform packages, such as `opencode-linux-x64`
+  1.18.3.
+- Its postinstall copies the matching binary and selects AVX2 or baseline from
+  the build host's CPU.
+- The installed binary links only against glibc.
+- The build fails unless `opencode --version` and `openspec --version` equal the
+  recorded versions.
+
+Baseline before the change, measured in a real session through the runner with
+native Linux state, on the per-user Alpine image `36a4ca917807`:
+- all five capability sets were zero and `NoNewPrivs` was `1`;
+- `memory.max=max`, `pids.max=512`, `cpu.max=max 100000`;
+- `HOME` and the XDG bases were host paths;
+- missing tools: `bwrap`, `file`, `gawk`, `nano`, `patch`, `python3`, `xz`,
+  `zip` and `openspec`.
+
+After the change, in a real session:
+- `HOME=/opencode-home`, with the XDG bases below it;
+- all capability sets are zero and `NoNewPrivs` is `1`;
+- `memory.max=4294967296`, `pids.max=512`, `cpu.max=200000 100000`, and the
+  overrides (`1g`, `1.5`, `256`) apply with and without delegation;
+- every toolset command is present, OpenCode reports `1.18.3` and OpenSpec
+  `1.16.0`.
+
+| Check | Result |
+| --- | --- |
+| Unit discovery (`test_wrapper.py`, `test_image_pins.py`; runtime skipped without opt-in) | 56 tests, OK (19 skipped) |
+| `bash tests/run-runtime.sh` (real rootless engine) | 19 tests, OK |
+| Lifetime expiry (`OPENCODE_CONTAINER_RUN_TIMEOUT=3`, `sleep 30`) | Stopped; client status 255; notice printed |
+| Process limit 32 | Process creation refused inside the session |
+| `bwrap --unshare-all`, Git, OpenSpec, delegated child container | Work without capabilities |
+| OpenTUI on glibc in a PTY | Welcome prompt observed; quit cleanly |
+| Shared state, ephemeral home, isolated `OPENCODE_CONTAINER_STATE_DIR` persistence | Passed |
+| Refused home workspace | Exit 1 before engine use |
+| `bash -n`, ShellCheck, `git diff --check` | Passed |
+| Test-owned managed containers after the runs | None |
+
+Initial failures and reruns:
+- **Build:** the first build failed because the version check created
+  `/opencode-home` before the final `mkdir`. The recipe now removes it and
+  recreates it with mode 1777.
+- **First wrapper run:** after the code change, the existing assertions failed
+  as expected, because the fake engine had no budget inspection and the layout
+  expectations were stale. Both were updated.
+- **Lifetime test:** it assumed that `0007` was accepted. The reference
+  validation rejects leading zeros, so the case moved to the rejected set.
+- **State inside the workspace:** shared state below the workspace was rejected
+  in the old layout only because the mount destinations coincided. With fixed
+  destinations below `/opencode-home` it no longer conflicts and is now
+  allowed. This keeps the unsafe-workspace override usable from the home
+  directory. Isolated state must still not overlap the workspace.
+- **Process-limit test:** the first version used Bash background jobs, so a
+  refused fork ended the script. It now uses the Python child-process probe
+  from the Codex suite.
+- **ShellCheck:** it reported SC2015 on two validation lines copied from the
+  reference. They are annotated, because `die` must also run when the second
+  test fails.
+
+Known limitations:
+- The lifetime notice compares whole seconds, so with a 1-second limit a fast
+  non-zero exit can print it.
+- With keep-id, a caller UID that already exists in the base image shows the
+  image user name, for example `node` for UID 1000. `USER` is still the host
+  name.
+- An image built on an AVX2 host must not be copied to a host without AVX2.

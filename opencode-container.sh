@@ -21,10 +21,11 @@ application grace. Only this invocation's verified container is removed;
 SIGKILL or engine loss can leave residual containers requiring inspection.
 
 Environment:
-  OPENCODE_CONTAINER_IMAGE    image name (default: per-user tag
-                         localhost/opencode-sandbox:<version>-<user>-<uid>-<gid>)
-  OPENCODE_CONTAINER_VERSION  OpenCode version to build (default: 1.18.3;
-                         the deprecated OPENCODE_VERSION is read when unset)
+  OPENCODE_CONTAINER_IMAGE    image name (default: localhost/opencode-cli:latest);
+                         OpenCode and OpenSpec versions are pinned in Containerfile
+  OPENCODE_CONTAINER_STATE_DIR private host directory used as the persistent
+                         /opencode-home (default: unset; the host OpenCode XDG
+                         directories are mounted below an ephemeral home)
   OPENCODE_CONTAINER_PODMAN   expose the host Podman socket only when exactly 1
                          (default: disabled; other values also disable access)
   OPENCODE_CONTAINER_PODMAN_SOCKET absolute socket override for enabled access
@@ -45,12 +46,28 @@ Environment:
                          (default: not mounted)
   OPENCODE_CONTAINER_SYSTEM_CONFIG exactly 1 mounts /etc/opencode read-only
                          (default: not mounted)
+  OPENCODE_CONTAINER_MEMORY_LIMIT session memory, integer with k/m/g unit (default: 4g)
+  OPENCODE_CONTAINER_CPU_LIMIT    session CPUs, up to 3 decimals (default: 2)
+  OPENCODE_CONTAINER_PIDS_LIMIT   session process limit (default: 512)
+                         Budgets cannot be disabled; they require delegated
+                         rootless cgroup v2 cpu/memory/pids controllers
+  OPENCODE_CONTAINER_RUN_TIMEOUT  session container lifetime in whole seconds
+                         (default: 0, disabled by default)
+  OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE exact 1 permits a refused sensitive
+                         workspace with a warning (default: disabled)
 
 Values are forwarded by name and never placed in engine arguments.
 ~/.claude is never mounted. GitHub tokens are never forwarded by default.
 Socket access permits new host mounts beyond the workspace with the service
 user's authority. YOLO and socket access are independent. Every session drops
-all capabilities, sets no-new-privileges and a 512-process limit.
+all capabilities and sets no-new-privileges; no security-policy overrides are
+added. Budgets and tmpfs sizes do not limit workspace or state storage growth.
+When the lifetime limit stops a session, a notice is printed and the engine
+client's exit status is kept.
+The writable workspace (or worktree parent) must not physically be /, /home,
+/root, /etc, /usr, /var, /bin, /sbin, /lib, /lib64, /boot, /opt, /srv, /mnt,
+/media, /proc, /sys, /dev, /run, /tmp, the caller's home or a /mnt/<letter>
+drive root; descendants such as /mnt/d/project are allowed.
 Worktree mode exposes the entire parent beyond the workspace.
 Linux rootless Podman and host GNU coreutils timeout are required.
 opencode-wrapper is a deprecated alias of this script.
@@ -88,19 +105,12 @@ esac
 if ((yolo)) && [[ -n "${OPENCODE_PERMISSION:-}" ]]; then
     die 'OPENCODE_CONTAINER_YOLO cannot be combined with OPENCODE_PERMISSION; unset one of them'
 fi
-readonly DEFAULT_OPENCODE_VERSION=1.18.3
-selected_version=$DEFAULT_OPENCODE_VERSION
-version_variable=OPENCODE_CONTAINER_VERSION
-if [[ -n "${OPENCODE_CONTAINER_VERSION+x}" ]]; then
-    selected_version=$OPENCODE_CONTAINER_VERSION
-elif [[ -n "${OPENCODE_VERSION+x}" ]]; then
-    version_variable=OPENCODE_VERSION
-    selected_version=$OPENCODE_VERSION
-    printf 'opencode-container: OPENCODE_VERSION is deprecated; use OPENCODE_CONTAINER_VERSION\n' >&2
-fi
-[[ "$selected_version" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
-    || die "$version_variable must be a version such as $DEFAULT_OPENCODE_VERSION"
-readonly SELECTED_VERSION=$selected_version
+# The OpenCode version is pinned in Containerfile; version variables are ignored.
+for variable_name in OPENCODE_CONTAINER_VERSION OPENCODE_VERSION; do
+    if [[ -n "${!variable_name+x}" ]]; then
+        printf 'opencode-container: %s is ignored; the OpenCode version is pinned in Containerfile\n' "$variable_name" >&2
+    fi
+done
 image_override=${OPENCODE_CONTAINER_IMAGE:-}
 [[ "$image_override" != *[[:space:][:cntrl:]]* ]] \
     || die 'OPENCODE_CONTAINER_IMAGE must not contain whitespace or control characters'
@@ -139,16 +149,16 @@ done
 integration_sources=()
 integration_destinations=()
 opt_in_integration() {
-    local variable=$1 path=$2 source
+    local variable=$1 path=$2 destination=$3 source
     [[ "${!variable:-}" == 1 ]] || return 0
     [[ "$path" == /* ]] || die "$variable requires an absolute path: $path"
     [[ -d "$path" ]] || die "$variable=1 but the directory does not exist: $path"
     source=$(cd -- "$path" && pwd -P) || die "$variable: cannot resolve $path"
     integration_sources+=("$source")
-    integration_destinations+=("$path")
+    integration_destinations+=("$destination")
 }
-opt_in_integration OPENCODE_CONTAINER_AGENTS_DIR "${HOME:-}/.agents"
-opt_in_integration OPENCODE_CONTAINER_SYSTEM_CONFIG /etc/opencode
+opt_in_integration OPENCODE_CONTAINER_AGENTS_DIR "${HOME:-}/.agents" /opencode-home/.agents
+opt_in_integration OPENCODE_CONTAINER_SYSTEM_CONFIG /etc/opencode /etc/opencode
 if ((provider_selected == 0)); then
     unforwarded=()
     for variable_name in $ALL_PROFILE_NAMES AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT GH_TOKEN GITHUB_TOKEN; do
@@ -172,8 +182,97 @@ WORKSPACE_NAME="$(basename -- "${WORKSPACE}")"
 readonly WORKSPACE_NAME
 readonly RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/${USER_ID}}"
 readonly PODMAN_SOCKET="${RUNTIME_DIR}/podman/podman.sock"
-IMAGE=${image_override:-localhost/opencode-sandbox:${SELECTED_VERSION}-${USER_NAME}-${USER_ID}-${GROUP_ID}}
+IMAGE=${image_override:-localhost/opencode-cli:latest}
 readonly IMAGE
+readonly CONTAINER_HOME=/opencode-home
+
+# Session budgets and lifetime, validated before any engine or state operation.
+# Same rules and messages as the claude-container reference (sandbox-ref-2).
+# Only an unset budget selects its default; no value disables a budget.
+memory_text=${OPENCODE_CONTAINER_MEMORY_LIMIT-4g}
+cpu_text=${OPENCODE_CONTAINER_CPU_LIMIT-2}
+pids_text=${OPENCODE_CONTAINER_PIDS_LIMIT-512}
+timeout_text=${OPENCODE_CONTAINER_RUN_TIMEOUT:-0}
+memory_bytes=0
+if [[ "$memory_text" =~ ^([1-9][0-9]{0,15})([kmgKMG])$ ]]; then
+    case "${BASH_REMATCH[2],,}" in
+        k) unit=1024 ;;
+        m) unit=1048576 ;;
+        *) unit=1073741824 ;;
+    esac
+    ((10#${BASH_REMATCH[1]} > (1 << 50) / unit)) || memory_bytes=$((10#${BASH_REMATCH[1]} * unit))
+fi
+((memory_bytes > 0)) || die 'OPENCODE_CONTAINER_MEMORY_LIMIT must be a positive integer with unit k, m or g, for example 4g'
+cpu_nano=0
+if [[ "$cpu_text" =~ ^([0-9]{1,4})(\.([0-9]{1,3}))?$ ]]; then
+    fraction=${BASH_REMATCH[3]}000
+    cpu_nano=$((10#${BASH_REMATCH[1]} * 1000000000 + 10#${fraction:0:3} * 1000000))
+    ((cpu_nano <= 1024000000000)) || cpu_nano=0
+fi
+((cpu_nano > 0)) || die 'OPENCODE_CONTAINER_CPU_LIMIT must be a positive number of CPUs with at most 3 decimals, for example 2 or 1.5'
+# shellcheck disable=SC2015 # die must run when either test fails.
+[[ "$pids_text" =~ ^(0|[1-9][0-9]{0,9})$ ]] && ((pids_text > 0 && pids_text <= 4194304)) \
+    || die 'OPENCODE_CONTAINER_PIDS_LIMIT must be a positive integer process count up to 4194304'
+# shellcheck disable=SC2015 # die must run when either test fails.
+[[ "$timeout_text" =~ ^(0|[1-9][0-9]{0,9})$ ]] && ((timeout_text <= 2147483647)) \
+    || die 'OPENCODE_CONTAINER_RUN_TIMEOUT must be whole seconds; 0 disables the lifetime limit'
+pids_limit=$((10#$pids_text))
+run_timeout=$((10#$timeout_text))
+
+# Refuse sensitive writable workspaces before any engine or state operation.
+[[ "${HOME:-}" == /* ]] || die 'HOME must be absolute'
+workspace_mount=$WORKSPACE
+((git_worktree == 0)) || workspace_mount=$(dirname -- "$WORKSPACE")
+# A missing home cannot be a workspace, so its lexical path is sufficient then.
+physical_home=$(cd -- "$HOME" 2>/dev/null && pwd -P) || physical_home=$HOME
+unsafe_workspace=0
+case "$workspace_mount" in
+    /|/home|/root|/etc|/usr|/var|/bin|/sbin|/lib|/lib64|/boot|/opt|/srv|/mnt|/media|/proc|/sys|/dev|/run|/tmp)
+        unsafe_workspace=1 ;;
+esac
+[[ "$workspace_mount" != "$physical_home" && ! "$workspace_mount" =~ ^/mnt/[A-Za-z]$ ]] || unsafe_workspace=1
+if ((unsafe_workspace)); then
+    [[ "${OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE:-}" == 1 ]] \
+        || die "refusing sensitive workspace $workspace_mount; launch from a project subdirectory or set exact OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1"
+    printf 'opencode-container: WARNING: sensitive workspace explicitly exposed read/write: %s\n' "$workspace_mount" >&2
+fi
+
+# Validate a private state directory with the same rules as the shared state.
+check_private_dir() {
+    local label=$1 path=$2 resolved owner mode
+    [[ -d "$path" ]] || die "$label is not a directory: $path"
+    resolved=$(cd -- "$path" && pwd -P) || die "cannot resolve $label: $path"
+    [[ -r "$resolved" && -w "$resolved" && -x "$resolved" ]] || die "$label is not accessible: $path"
+    owner=$(stat -c '%u' -- "$resolved") || die "cannot inspect $label owner: $path"
+    mode=$(stat -c '%a' -- "$resolved") || die "cannot inspect $label mode: $path"
+    [[ "$owner" == "$USER_ID" ]] || die "$label must belong to caller: $path"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "invalid $label mode: $path"
+    (( (8#$mode & 077) == 0 )) || die "$label must be private: $path; correct permissions manually or choose native Linux storage"
+    printf '%s' "$resolved"
+}
+state_home=''
+if [[ -n "${OPENCODE_CONTAINER_STATE_DIR+x}" ]]; then
+    state_request=$OPENCODE_CONTAINER_STATE_DIR
+    [[ "$state_request" == /* && "$state_request" != *:* && "$state_request" != *$'\n'* && "$state_request" != *$'\r'* ]] \
+        || die "OPENCODE_CONTAINER_STATE_DIR must be an absolute path without colon, CR or LF: $state_request"
+    # Compare physical paths; a missing directory is resolved through its parent.
+    state_parent=$(dirname -- "$state_request")
+    state_physical=$state_request
+    if [[ -d "$state_parent" ]]; then
+        state_physical=$(cd -- "$state_parent" && pwd -P)/$(basename -- "$state_request")
+        [[ ! -e "$state_request" ]] || state_physical=$(cd -- "$state_request" 2>/dev/null && pwd -P) || state_physical=$state_request
+    fi
+    state_physical=${state_physical%/}
+    [[ "$state_physical/" != "$workspace_mount/"* && "$workspace_mount/" != "$state_physical/"* ]] \
+        || die "OPENCODE_CONTAINER_STATE_DIR must not overlap the workspace: $state_request"
+    if [[ ! -e "$state_request" && ! -L "$state_request" ]]; then
+        (umask 077; mkdir -p -- "$state_request") || die "cannot create OPENCODE_CONTAINER_STATE_DIR: $state_request"
+    fi
+    state_home=$(check_private_dir OPENCODE_CONTAINER_STATE_DIR "$state_request") || exit 1
+    for relative in .config/opencode .local/share/opencode .cache/opencode .local/state/opencode; do
+        (umask 077; mkdir -p -- "$state_home/$relative") || die "cannot create private state: $state_home/$relative"
+    done
+fi
 
 if ! command -v podman >/dev/null 2>&1; then
     printf 'error: podman is required to run the OpenCode sandbox\n' >&2
@@ -253,9 +352,6 @@ valid_bind_path() {
     [[ "$1" == /* && "$1" != *:* && "$1" != *$'\n'* && "$1" != *$'\r'* ]] \
         || die "bind paths must be absolute and contain no colon, CR or LF: $1"
 }
-[[ "${HOME:-}" == /* ]] || die 'HOME must be absolute'
-workspace_mount=$WORKSPACE
-((git_worktree == 0)) || workspace_mount=$(dirname -- "$WORKSPACE")
 mount_args=()
 mount_sources=()
 mount_destinations=()
@@ -265,7 +361,7 @@ add_bind() {
     valid_bind_path "$source"
     valid_bind_path "$destination"
     # A bind may live below an ephemeral mount, but must never shadow it.
-    for previous in /tmp /var/tmp /run; do
+    for previous in /tmp /var/tmp /run "$CONTAINER_HOME"; do
         [[ "$previous/" != "$destination/"* ]] || die "bind shadows temporary storage: $destination"
     done
     for index in "${!mount_destinations[@]}"; do
@@ -282,32 +378,36 @@ add_bind() {
     mount_args+=(--volume "$source:$destination:$access")
 }
 add_bind "$workspace_mount" "$workspace_mount" rw
-xdg_args=()
+# The container home is dedicated; OpenCode state lives at fixed XDG paths below it.
+home_args=()
+xdg_args=(
+    --env "XDG_CONFIG_HOME=$CONTAINER_HOME/.config"
+    --env "XDG_DATA_HOME=$CONTAINER_HOME/.local/share"
+    --env "XDG_CACHE_HOME=$CONTAINER_HOME/.cache"
+    --env "XDG_STATE_HOME=$CONTAINER_HOME/.local/state"
+)
 private_xdg() {
-    local variable=$1 fallback=$2 base path resolved owner mode destination
+    local variable=$1 fallback=$2 base path resolved
     base=${!variable:-$HOME/$fallback}
     [[ "$base" == /* ]] || die "$variable must be absolute: $base"
     path=${base%/}/opencode
     if [[ ! -e "$path" && ! -L "$path" ]]; then
         (umask 077; mkdir -p -- "$path") || die "cannot create private state: $path"
     fi
-    [[ -d "$path" ]] || die "state is not a directory: $path"
-    resolved=$(cd -- "$path" && pwd -P) || die "cannot resolve state: $path"
-    [[ -r "$resolved" && -w "$resolved" && -x "$resolved" ]] || die "state is not accessible: $path"
-    owner=$(stat -c '%u' -- "$resolved") || die "cannot inspect state owner: $path"
-    mode=$(stat -c '%a' -- "$resolved") || die "cannot inspect state mode: $path"
-    [[ "$owner" == "$USER_ID" ]] || die "state must belong to caller: $path"
-    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || die "invalid state mode: $path"
-    (( (8#$mode & 077) == 0 )) || die "state must be private: $path; correct permissions manually or choose native Linux storage"
-    base=$(dirname -- "$resolved")
-    destination=${base%/}/opencode
-    add_bind "$resolved" "$destination" rw
-    xdg_args+=(--env "$variable=$base")
+    resolved=$(check_private_dir state "$path") || exit 1
+    add_bind "$resolved" "$CONTAINER_HOME/$fallback/opencode" rw
 }
-private_xdg XDG_CONFIG_HOME .config
-private_xdg XDG_DATA_HOME .local/share
-private_xdg XDG_CACHE_HOME .cache
-private_xdg XDG_STATE_HOME .local/state
+if [[ -n "$state_home" ]]; then
+    # Isolated mode: the private directory is the persistent home.
+    valid_bind_path "$state_home"
+    home_args=(--volume "$state_home:$CONTAINER_HOME:rw")
+else
+    home_args=(--tmpfs "$CONTAINER_HOME:rw,exec,nosuid,nodev,mode=1777,size=512m")
+    private_xdg XDG_CONFIG_HOME .config
+    private_xdg XDG_DATA_HOME .local/share
+    private_xdg XDG_CACHE_HOME .cache
+    private_xdg XDG_STATE_HOME .local/state
+fi
 
 # Optional integrations are mounted only on exact opt-in; ~/.claude never is.
 for index in "${!integration_sources[@]}"; do
@@ -320,12 +420,13 @@ fi
 run_args=(
     --rm --interactive --read-only --read-only-tmpfs=false
     --userns=keep-id --user "$USER_ID:$GROUP_ID"
-    --cap-drop=all --security-opt=no-new-privileges --pids-limit=512
+    --cap-drop=all --security-opt=no-new-privileges
+    --memory="$memory_bytes" --cpus="$cpu_text" --pids-limit="$pids_limit"
     --tmpfs "/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m"
     --tmpfs "/run:rw,nosuid,nodev,noexec,mode=1777,size=32m"
     --tmpfs "/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m"
-    "${mount_args[@]}" "${xdg_args[@]}"
-    --env "HOME=$HOME" --env "USER=$USER_NAME"
+    "${home_args[@]}" "${mount_args[@]}" "${xdg_args[@]}"
+    --env "HOME=$CONTAINER_HOME" --env "USER=$USER_NAME"
     --workdir "$WORKSPACE"
     --label io.opencode-container.managed=true
     --label "io.opencode-container.workspace=$WORKSPACE"
@@ -361,6 +462,10 @@ else
     run_args+=(--unsetenv CONTAINER_HOST)
 fi
 
+if ((run_timeout > 0)); then
+    run_args+=(--timeout "$run_timeout")
+fi
+
 if [[ -t 0 && -t 1 ]]; then
     run_args+=(--tty)
 fi
@@ -371,10 +476,7 @@ if ((shell_mode)); then
 fi
 
 build_current_image() {
-    podman build --tag "$IMAGE" --file "$SCRIPT_DIR/Containerfile" \
-        --build-arg "OPENCODE_VERSION=$SELECTED_VERSION" \
-        --build-arg "USER_NAME=$USER_NAME" --build-arg "USER_ID=$USER_ID" \
-        --build-arg "GROUP_ID=$GROUP_ID" "$SCRIPT_DIR"
+    podman build --tag "$IMAGE" --file "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR"
 }
 if ((build_image)); then
     build_current_image
@@ -575,10 +677,21 @@ for ((attempt=0; attempt<20; attempt++)); do
     esac
 done
 [[ -n "$container_id" ]] || die 'cannot reserve container name after 20 confirmed collisions'
+# Engine flags alone are not evidence: require the created configuration to
+# carry every selected budget before the application starts.
+configured_budgets=$(timeout --kill-after=1s 10s podman inspect --type container \
+    --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}} {{.HostConfig.PidsLimit}}' "$container_id") \
+    || die 'cannot inspect session resource budgets; session not started'
+[[ "$configured_budgets" == "$memory_bytes $cpu_nano $pids_limit" ]] \
+    || die "session resource budgets were not applied (expected memory=$memory_bytes nano_cpus=$cpu_nano pids=$pids_limit); check rootless cgroup v2 cpu/memory/pids controller delegation; session not started"
+started_at=$SECONDS
 # Explicit redirection keeps Bash from replacing background-client stdin.
 podman start --attach --interactive --sig-proxy=false "$container_id" <&0 &
 client_pid=$!
 status=0
 wait "$client_pid" || status=$?
 client_pid=''
+if ((run_timeout > 0 && status != 0 && SECONDS - started_at >= run_timeout)); then
+    printf 'opencode-container: session lifetime limit reached (%s s); exit status %s\n' "$run_timeout" "$status" >&2
+fi
 exit "$status"

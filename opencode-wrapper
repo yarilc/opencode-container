@@ -12,6 +12,18 @@ Usage: opencode-wrapper [container options] [OpenCode arguments...]
   --container-help          show this help without tools or filesystem changes
 
 Other arguments, including --help, are passed unchanged to OpenCode.
+
+Exposure controls (values are never placed in engine arguments):
+  OPENCODE_CONTAINER_PROVIDER       forward one provider's variables by name:
+                                    anthropic, openai, google, openrouter,
+                                    amazon-bedrock, azure, opencode or none
+                                    (unset means none; stored `opencode auth
+                                    login` credentials work without it)
+  OPENCODE_CONTAINER_ENV_VARS       space-separated extra variable names to
+                                    forward by name, e.g. "GH_TOKEN"
+  OPENCODE_CONTAINER_AGENTS_DIR=1   mount ~/.agents read-only
+  OPENCODE_CONTAINER_SYSTEM_CONFIG=1  mount /etc/opencode read-only
+~/.claude is never mounted. GitHub tokens are never forwarded by default.
 Worktree mode exposes the entire parent beyond the workspace, retaining workdir.
 Linux rootless Podman and host GNU coreutils timeout are required.
 See README.md for engine, private XDG state, delegation and cleanup contracts.
@@ -35,6 +47,64 @@ done
 SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(dirname -- "$SCRIPT_PATH")
 readonly SCRIPT_PATH SCRIPT_DIR
+
+die() { printf 'opencode-wrapper: %s\n' "$*" >&2; exit 1; }
+
+# Exposure controls are validated before any engine query or state creation.
+readonly AUTHORITATIVE_NAMES=' HOME USER XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION '
+readonly ALL_PROFILE_NAMES='ANTHROPIC_API_KEY OPENAI_API_KEY OPENAI_BASE_URL GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_BEARER_TOKEN_BEDROCK AZURE_RESOURCE_NAME AZURE_API_KEY OPENCODE_API_KEY'
+provider_selected=0
+provider_names=()
+if [[ -n "${OPENCODE_CONTAINER_PROVIDER+x}" ]]; then
+    provider_selected=1
+    # Variable sets follow the provider metadata of the pinned OpenCode 1.18.3.
+    case "$OPENCODE_CONTAINER_PROVIDER" in
+        anthropic) provider_names=(ANTHROPIC_API_KEY) ;;
+        openai) provider_names=(OPENAI_API_KEY OPENAI_BASE_URL) ;;
+        google) provider_names=(GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY) ;;
+        openrouter) provider_names=(OPENROUTER_API_KEY) ;;
+        amazon-bedrock) provider_names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_BEARER_TOKEN_BEDROCK) ;;
+        azure) provider_names=(AZURE_RESOURCE_NAME AZURE_API_KEY) ;;
+        opencode) provider_names=(OPENCODE_API_KEY) ;;
+        none) ;;
+        *) die 'OPENCODE_CONTAINER_PROVIDER must be one of: anthropic, openai, google, openrouter, amazon-bedrock, azure, opencode, none' ;;
+    esac
+fi
+extra_names=()
+read -r -a requested_extra_names <<< "${OPENCODE_CONTAINER_ENV_VARS:-}"
+for variable_name in "${requested_extra_names[@]}"; do
+    [[ "$variable_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+        || die "OPENCODE_CONTAINER_ENV_VARS contains an invalid variable name: $variable_name"
+    if [[ "$AUTHORITATIVE_NAMES" == *" $variable_name "* ]]; then
+        printf 'opencode-wrapper: OPENCODE_CONTAINER_ENV_VARS: skipping %s, which the wrapper sets itself\n' "$variable_name" >&2
+        continue
+    fi
+    extra_names+=("$variable_name")
+done
+integration_sources=()
+integration_destinations=()
+opt_in_integration() {
+    local variable=$1 path=$2 source
+    [[ "${!variable:-}" == 1 ]] || return 0
+    [[ "$path" == /* ]] || die "$variable requires an absolute path: $path"
+    [[ -d "$path" ]] || die "$variable=1 but the directory does not exist: $path"
+    source=$(cd -- "$path" && pwd -P) || die "$variable: cannot resolve $path"
+    integration_sources+=("$source")
+    integration_destinations+=("$path")
+}
+opt_in_integration OPENCODE_CONTAINER_AGENTS_DIR "${HOME:-}/.agents"
+opt_in_integration OPENCODE_CONTAINER_SYSTEM_CONFIG /etc/opencode
+if ((provider_selected == 0)); then
+    unforwarded=()
+    for variable_name in $ALL_PROFILE_NAMES AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT GH_TOKEN GITHUB_TOKEN; do
+        [[ -n "${!variable_name:-}" ]] || continue
+        [[ " ${extra_names[*]} " != *" $variable_name "* ]] || continue
+        unforwarded+=("$variable_name")
+    done
+    if ((${#unforwarded[@]})); then
+        printf 'opencode-wrapper: not forwarding %s; set OPENCODE_CONTAINER_PROVIDER=<provider> or list names in OPENCODE_CONTAINER_ENV_VARS (OPENCODE_CONTAINER_PROVIDER=none silences this notice)\n' "${unforwarded[*]}" >&2
+    fi
+fi
 readonly OPENCODE_VERSION="${OPENCODE_VERSION:-1.18.3}"
 USER_NAME="$(id -un)"
 readonly USER_NAME
@@ -55,7 +125,6 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 127
 fi
 
-die() { printf 'opencode-wrapper: %s\n' "$*" >&2; exit 1; }
 command -v timeout >/dev/null && [[ $(timeout --version) == *'GNU coreutils'* ]] \
     || die 'host GNU coreutils timeout is required'
 
@@ -185,11 +254,9 @@ private_xdg XDG_DATA_HOME .local/share
 private_xdg XDG_CACHE_HOME .cache
 private_xdg XDG_STATE_HOME .local/state
 
-for readonly_path in "${HOME}/.claude" "${HOME}/.agents" /etc/opencode; do
-    if [[ -d "$readonly_path" ]]; then
-        readonly_source=$(cd -- "$readonly_path" && pwd -P) || die "cannot resolve integration: $readonly_path"
-        add_bind "$readonly_source" "$readonly_path" ro
-    fi
+# Optional integrations are mounted only on exact opt-in; ~/.claude never is.
+for index in "${!integration_sources[@]}"; do
+    add_bind "${integration_sources[index]}" "${integration_destinations[index]}" ro
 done
 if ((delegate)); then
     add_bind "$host_socket" /run/podman/podman.sock rw
@@ -210,6 +277,8 @@ run_args=(
     --label "io.opencode.workspace-name=$NAME_PREFIX"
 )
 
+# Forward by name: base allowlist, selected provider profile, operator names.
+forwarded=' '
 for variable_name in \
     TERM COLORTERM LANG LC_ALL \
     HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy \
@@ -217,12 +286,9 @@ for variable_name in \
     OPENCODE_PERMISSION OPENCODE_SERVER_PASSWORD OPENCODE_SERVER_USERNAME \
     OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_DEFAULT_PLUGINS \
     OPENCODE_DISABLE_LSP_DOWNLOAD OPENCODE_DISABLE_MODELS_FETCH \
-    ANTHROPIC_API_KEY OPENAI_API_KEY OPENAI_BASE_URL \
-    GOOGLE_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY \
-    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION \
-    AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT \
-    GH_TOKEN GITHUB_TOKEN; do
-    if [[ -n "${!variable_name:-}" ]]; then
+    "${provider_names[@]}" "${extra_names[@]}"; do
+    if [[ -n "${!variable_name:-}" && "$forwarded" != *" $variable_name "* ]]; then
+        forwarded+="$variable_name "
         run_args+=(--env "$variable_name")
     fi
 done

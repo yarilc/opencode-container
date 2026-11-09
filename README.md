@@ -126,17 +126,80 @@ whose target is differently named bind at `<physical-parent>/opencode` so the
 application still finds its validated state. Conflicting mount destinations
 are rejected. No writable home outside declared mounts is introduced.
 
-Existing `$HOME/.claude`, `$HOME/.agents`, and `/etc/opencode` are optional
-read-only integrations. The entire home, `.ssh`, `.aws`, `.docker`, global
-`.gitconfig`, and Podman configuration are not implicitly mounted.
+`$HOME/.agents` and `/etc/opencode` are optional read-only integrations,
+mounted only on exact opt-in:
+
+| Variable | Mounts (read-only) |
+| --- | --- |
+| `OPENCODE_CONTAINER_AGENTS_DIR=1` | `$HOME/.agents` (for example `~/.agents/skills`) |
+| `OPENCODE_CONTAINER_SYSTEM_CONFIG=1` | `/etc/opencode` |
+
+Any other value leaves the directory unmounted. An opt-in for a missing
+directory stops before any engine query. `$HOME/.claude` is never mounted: it
+holds Claude Code credentials and sessions. The entire home, `.ssh`, `.aws`,
+`.docker`, global `.gitconfig`, and Podman configuration are not implicitly
+mounted.
 Quoted bind arguments support spaces and commas. Colon/CR/LF bind paths are
 rejected before image operations rather than misinterpreted.
 
-Environment forwarding uses the explicit wrapper allowlist and nonempty
-inherited values, passed by name (`--env VARIABLE`), so credentials are absent
-from generated Podman arguments. Values remain visible to container processes
-and engine inspection. HOME/USER/XDG and the enabled delegation endpoint are
-deliberate nonsecret assignments; `--env-host` is never used.
+### Environment and provider credentials
+
+Environment forwarding passes nonempty inherited values by name
+(`--env VARIABLE`), so credentials are absent from generated Podman arguments.
+Values remain visible to container processes and engine inspection. HOME/USER/XDG
+and the enabled delegation endpoint are deliberate nonsecret assignments;
+`--env-host` is never used. Three sources are forwarded:
+
+1. The base allowlist: `TERM`, `COLORTERM`, `LANG`, `LC_ALL`, the proxy
+   variables, and the OpenCode configuration variables (`OPENCODE_CONFIG`,
+   `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`,
+   `OPENCODE_SERVER_PASSWORD`, `OPENCODE_SERVER_USERNAME` and the
+   `OPENCODE_DISABLE_*` controls).
+2. The provider selected with `OPENCODE_CONTAINER_PROVIDER`. Values are
+   OpenCode provider IDs; the variable sets come from the provider metadata of
+   the pinned OpenCode 1.18.3:
+
+   | Value | Variables |
+   | --- | --- |
+   | `anthropic` | `ANTHROPIC_API_KEY` |
+   | `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
+   | `google` | `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY` |
+   | `openrouter` | `OPENROUTER_API_KEY` |
+   | `amazon-bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK` |
+   | `azure` | `AZURE_RESOURCE_NAME`, `AZURE_API_KEY` |
+   | `opencode` | `OPENCODE_API_KEY` (OpenCode Zen) |
+   | `none` | none |
+
+   Unset means `none`. Any other value, including empty, stops before engine
+   queries. Credentials stored with `opencode auth login` live in the mounted
+   OpenCode data directory and work without this variable. Google Vertex is not
+   supported: its credentials file is not mounted.
+3. `OPENCODE_CONTAINER_ENV_VARS`: a space-separated list of extra variable
+   names, for example `OPENCODE_CONTAINER_ENV_VARS="GH_TOKEN DATABASE_URL"`.
+   Invalid names stop before engine queries. `HOME`, `USER`, the XDG bases,
+   `CONTAINER_HOST` and `CONTAINER_CONNECTION` are skipped with a warning.
+
+`GH_TOKEN` and `GITHUB_TOKEN` are never forwarded by default.
+
+### Migrating from earlier releases
+
+Earlier releases mounted `~/.claude`, `~/.agents` and `/etc/opencode` whenever
+they existed, and forwarded every set Anthropic, OpenAI, Google/Gemini,
+OpenRouter, AWS, Azure and GitHub variable.
+
+- Set `OPENCODE_CONTAINER_PROVIDER` for the provider you use, or authenticate
+  once with `opencode auth login` inside the container.
+- While `OPENCODE_CONTAINER_PROVIDER` is unset, the wrapper prints one notice
+  naming formerly forwarded variables that are set but no longer forwarded
+  (names only). `OPENCODE_CONTAINER_PROVIDER=none` silences it.
+- Azure users: OpenCode's `azure` provider reads `AZURE_RESOURCE_NAME` and
+  `AZURE_API_KEY`, not the previously forwarded `AZURE_OPENAI_*` names.
+- List GitHub tokens or extra provider keys in `OPENCODE_CONTAINER_ENV_VARS`.
+- OpenCode no longer sees `~/.claude/CLAUDE.md` or `~/.claude/skills`. Move
+  skills to `~/.agents/skills` with `OPENCODE_CONTAINER_AGENTS_DIR=1`, or move
+  instructions and skills into the OpenCode configuration directory.
+- Set `OPENCODE_CONTAINER_AGENTS_DIR=1` or `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`
+  to keep the other integrations.
 
 ## Security
 

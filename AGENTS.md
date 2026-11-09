@@ -14,11 +14,11 @@
 - Delegate only with exact `OPENCODE_CONTAINER_PODMAN=1`; all other values omit the mount and explicitly unset session CONTAINER_HOST. Enabled verification failures stop before image operations. Select nonempty OPENCODE_CONTAINER_PODMAN_SOCKET, Unix launch endpoint, then runtime default; query the canonical accessible socket and bind its reported absolute host source. Never start/enable services or silently fall back.
 - Preserve host security policy: no SELinux label disabling or automatic relabeling. Document manual service/permissions/SELinux setup. Socket authority can create host mounts beyond the workspace. Reject failed, incomplete, extra-record, or CR-containing engine/service responses, preserving trailing records and query status.
 - Preserve the host workspace at the same absolute path inside the container so containers launched through `podman-remote` can bind it correctly.
-- Keep the root filesystem read-only. Only the workspace and OpenCode XDG directories are host-writable; `.claude`, `.agents`, and `/etc/opencode` are optional read-only mounts.
+- Keep the root filesystem read-only. Only the workspace and OpenCode XDG directories are host-writable. `.agents` and `/etc/opencode` are read-only mounts only on exact `OPENCODE_CONTAINER_AGENTS_DIR=1` / `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`; never mount `~/.claude` or another agent's state.
 - Keep `/tmp` as an ephemeral `tmpfs` with `nosuid,nodev`, but never add `noexec`: OpenTUI extracts a shared library there and loads it at startup.
 - Do not replace existing containers. Names are `<sanitized-workspace-basename>-N`, where `N` is one greater than the highest existing suffix; reserve names atomically with `podman create`.
 - Image tags include OpenCode version, username, UID, and GID. The process inside the image must have the host user's numeric identity and username.
-- Forward environment variables through the explicit allowlist only; never introduce `--env-host`.
+- Forward environment variables by name only from the base allowlist, the provider profile selected with `OPENCODE_CONTAINER_PROVIDER`, and names in `OPENCODE_CONTAINER_ENV_VARS`; never forward GitHub tokens or other providers' keys by default, and never introduce `--env-host`. Profile variable sets follow the pinned OpenCode version's provider metadata; re-read them when the version changes.
 
 ## Verification
 
@@ -77,12 +77,14 @@ read/write/traverse access and absence of group/other permissions before image
 operations. Never repair state with chmod/chown or copy credentials. Preserve
 supplied HOME, including nonstandard homes; normalized session XDG bases must
 reach validated mounts even through symlinks. Reject destination conflicts.
-Keep optional integrations read-only and preserve physical absolute bind sources.
+Keep opted-in integrations read-only and preserve physical absolute bind sources.
 Use explicit tmpfs mounts: exec `/tmp` 512 MiB, noexec `/var/tmp` 512 MiB and
 noexec `/run` 32 MiB, all nosuid/nodev mode 1777; disable automatic read-only
 tmpfs provisioning. Verify actual flags and ephemeral lifetime at runtime.
-Forward nonempty allowlisted inherited variables by name, keeping secret values
-out of generated engine-client arguments. This does not hide values from engine
+Forward nonempty inherited variables by name from the base allowlist, the
+selected provider profile and the operator-listed names, keeping secret values
+out of generated engine-client arguments. Validate the provider value and the
+listed names, and check opted-in integration directories, before engine queries. This does not hide values from engine
 inspection or container processes. Identity/path assignments remain explicit;
 image defaults or forwarded values must not override disabled delegation.
 

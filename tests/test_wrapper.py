@@ -176,6 +176,11 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.calls())
         self.assertFalse((self.base / 'home').exists())
+        for needle in ('OPENCODE_CONTAINER_PROVIDER', 'OPENCODE_CONTAINER_ENV_VARS',
+                       'OPENCODE_CONTAINER_AGENTS_DIR', 'OPENCODE_CONTAINER_SYSTEM_CONFIG',
+                       'anthropic, openai, google, openrouter', 'amazon-bedrock',
+                       'azure, opencode or none', '~/.claude is never mounted'):
+            self.assertIn(needle, result.stdout)
         result = self.run_wrapper('run', 'hello world', '', '--help', FAKE_INFO='true linux false')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.create()[-4:], ['run', 'hello world', '', '--help'])
@@ -328,13 +333,13 @@ class WrapperTests(unittest.TestCase):
         project=self.base/'parent, spaces'/'workspace, spaces'; project.mkdir(parents=True)
         home=self.base/'home, spaces'; home.mkdir()
         (home/'.claude').mkdir(); (home/'.agents').mkdir()
-        result=self.run_wrapper(cwd=project,HOME=str(home))
+        result=self.run_wrapper(cwd=project,HOME=str(home),OPENCODE_CONTAINER_AGENTS_DIR='1')
         self.assertEqual(result.returncode,0,result.stderr)
         create=self.create()
         for path in (project,home/'.config/opencode',home/'.cache/opencode'):
             self.assertIn(f'{path}:{path}:rw',create)
-        for path in (home/'.claude',home/'.agents'):
-            self.assertIn(f'{path}:{path}:ro',create)
+        self.assertIn(f'{home/".agents"}:{home/".agents"}:ro',create)
+        self.assertFalse(any('.claude' in arg for arg in create))
         self.assertNotIn(f'{home}:{home}:rw',create)
         self.log.unlink()
         alias=self.base/'work-alias'; alias.symlink_to(project)
@@ -348,7 +353,8 @@ class WrapperTests(unittest.TestCase):
         self.assert_no_images()
 
     def test_tmpfs_and_named_environment(self):
-        result=self.run_wrapper(OPENAI_API_KEY='synthetic-secret',OPENCODE_SERVER_PASSWORD='synthetic-pass',UNLISTED_SECRET='unlisted')
+        result=self.run_wrapper(OPENAI_API_KEY='synthetic-secret',OPENCODE_SERVER_PASSWORD='synthetic-pass',UNLISTED_SECRET='unlisted',
+                                ANTHROPIC_API_KEY='other-secret',OPENCODE_CONTAINER_PROVIDER='openai')
         self.assertEqual(result.returncode,0,result.stderr)
         create=self.create()
         self.assertIn('--read-only-tmpfs=false',create)
@@ -357,9 +363,136 @@ class WrapperTests(unittest.TestCase):
                           '/run:rw,nosuid,nodev,noexec,mode=1777,size=32m',
                           '/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m'])
         self.assertIn('OPENAI_API_KEY',create); self.assertIn('OPENCODE_SERVER_PASSWORD',create)
-        self.assertNotIn('UNLISTED_SECRET',create)
+        self.assertNotIn('UNLISTED_SECRET',create); self.assertNotIn('ANTHROPIC_API_KEY',create)
         self.assertNotIn('synthetic-secret',self.log.read_text())
         self.assertNotIn('synthetic-pass',self.log.read_text())
+
+    def forwarded(self):
+        create=self.create()
+        # Terminal and locale names belong to the unchanged base allowlist.
+        return [create[i+1] for i,v in enumerate(create) if v=='--env' and '=' not in create[i+1]
+                and create[i+1] not in ('TERM','LANG')]
+
+    def assert_refused(self,result,needle):
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn(needle,result.stderr)
+        self.assertFalse(self.calls())
+        self.assertFalse((self.base/'home').exists())
+
+    def test_claude_state_is_never_mounted(self):
+        home=self.base/'home'; claude=home/'.claude'; claude.mkdir(parents=True)
+        (claude/'.credentials.json').write_text('{"synthetic": true}')
+        (home/'.agents').mkdir()
+        for env in ({},{'OPENCODE_CONTAINER_AGENTS_DIR':'1','OPENCODE_CONTAINER_SYSTEM_CONFIG':'yes'}):
+            if self.log.exists(): self.log.unlink()
+            result=self.run_wrapper(**env)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertFalse(any('.claude' in arg for arg in self.create()))
+
+    def test_integrations_require_exact_opt_in(self):
+        home=self.base/'home'; agents=home/'.agents'; agents.mkdir(parents=True)
+        for value in (None,'','true','yes','01'):
+            if self.log.exists(): self.log.unlink()
+            env={} if value is None else {'OPENCODE_CONTAINER_AGENTS_DIR':value}
+            result=self.run_wrapper(**env)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertFalse(any('.agents' in arg for arg in self.create()),value)
+            self.assertFalse(any(arg.startswith('/etc/opencode') for arg in self.create()))
+        self.log.unlink()
+        result=self.run_wrapper(OPENCODE_CONTAINER_AGENTS_DIR='1')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn(f'{agents}:{agents}:ro',self.create())
+
+    def test_missing_opted_in_integration_fails_early(self):
+        result=self.run_wrapper(OPENCODE_CONTAINER_AGENTS_DIR='1')
+        self.assert_refused(result,'OPENCODE_CONTAINER_AGENTS_DIR')
+        self.assertIn(str(self.base/'home'/'.agents'),result.stderr)
+        if not Path('/etc/opencode').exists():
+            result=self.run_wrapper(OPENCODE_CONTAINER_SYSTEM_CONFIG='1')
+            self.assert_refused(result,'OPENCODE_CONTAINER_SYSTEM_CONFIG')
+
+    PROFILES={
+        'anthropic':['ANTHROPIC_API_KEY'],
+        'openai':['OPENAI_API_KEY','OPENAI_BASE_URL'],
+        'google':['GOOGLE_API_KEY','GOOGLE_GENERATIVE_AI_API_KEY','GEMINI_API_KEY'],
+        'openrouter':['OPENROUTER_API_KEY'],
+        'amazon-bedrock':['AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','AWS_SESSION_TOKEN','AWS_REGION','AWS_BEARER_TOKEN_BEDROCK'],
+        'azure':['AZURE_RESOURCE_NAME','AZURE_API_KEY'],
+        'opencode':['OPENCODE_API_KEY'],
+        'none':[],
+    }
+    LEGACY=['AZURE_OPENAI_API_KEY','AZURE_OPENAI_ENDPOINT','GH_TOKEN','GITHUB_TOKEN']
+
+    def test_provider_profiles(self):
+        every=sorted({n for names in self.PROFILES.values() for n in names}|set(self.LEGACY))
+        secrets={name:f'synthetic-{name.lower()}' for name in every}
+        for provider,names in self.PROFILES.items():
+            with self.subTest(provider=provider):
+                if self.log.exists(): self.log.unlink()
+                result=self.run_wrapper(OPENCODE_CONTAINER_PROVIDER=provider,**secrets)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.forwarded(),names)
+                self.assertNotIn('not forwarding',result.stderr)
+                log=self.log.read_text()
+                for value in secrets.values():
+                    self.assertNotIn(value,log)
+        if self.log.exists(): self.log.unlink()
+        result=self.run_wrapper(OPENCODE_CONTAINER_PROVIDER='amazon-bedrock',AWS_REGION='eu-west-1',AWS_SESSION_TOKEN='')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.forwarded(),['AWS_REGION'])
+
+    def test_unsupported_provider_fails_early(self):
+        for value in ('','Anthropic','vertex','openai anthropic','google-vertex'):
+            with self.subTest(value=value):
+                result=self.run_wrapper(OPENCODE_CONTAINER_PROVIDER=value)
+                self.assert_refused(result,'OPENCODE_CONTAINER_PROVIDER')
+                self.assertIn('amazon-bedrock',result.stderr)
+
+    def test_unselected_provider_forwards_nothing_and_notifies(self):
+        result=self.run_wrapper(OPENAI_API_KEY='synthetic-openai',GITHUB_TOKEN='synthetic-github')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.forwarded(),[])
+        notices=[line for line in result.stderr.splitlines() if 'not forwarding' in line]
+        self.assertEqual(len(notices),1)
+        for needle in ('OPENAI_API_KEY','GITHUB_TOKEN','OPENCODE_CONTAINER_PROVIDER','OPENCODE_CONTAINER_ENV_VARS'):
+            self.assertIn(needle,notices[0])
+        self.assertNotIn('synthetic-',result.stderr)
+        self.assertIn('stdin:input payload',result.stdout)
+        for provider in ('none','openai'):
+            result=self.run_wrapper(OPENCODE_CONTAINER_PROVIDER=provider,OPENAI_API_KEY='x',GITHUB_TOKEN='y')
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertNotIn('not forwarding',result.stderr)
+        result=self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS='GITHUB_TOKEN',OPENAI_API_KEY='x',GITHUB_TOKEN='y')
+        notice=next(line for line in result.stderr.splitlines() if 'not forwarding' in line)
+        self.assertIn('OPENAI_API_KEY',notice); self.assertNotIn('GITHUB_TOKEN',notice)
+        result=self.run_wrapper(UNRELATED='x')
+        self.assertNotIn('not forwarding',result.stderr)
+
+    def test_extra_environment_names(self):
+        result=self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS='  GH_TOKEN\tDATABASE_URL LANG GH_TOKEN EMPTY_ONE ',
+                                OPENCODE_CONTAINER_PROVIDER='none',GH_TOKEN='synthetic-gh',
+                                DATABASE_URL='synthetic-db',EMPTY_ONE='')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.forwarded(),['GH_TOKEN','DATABASE_URL'])
+        self.assertNotIn('synthetic-',self.log.read_text())
+        for token in ('BAD-NAME','X=1','1ABC'):
+            with self.subTest(token=token):
+                if self.log.exists(): self.log.unlink()
+                home=self.base/f'fresh-home-{len(token)}'
+                result=self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS=f'GH_TOKEN {token}',HOME=str(home))
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn(token,result.stderr)
+                self.assertFalse(self.calls()); self.assertFalse(home.exists())
+        result=self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS='CONTAINER_HOST HOME XDG_DATA_HOME',
+                                OPENCODE_CONTAINER_PODMAN='0')
+        self.assertEqual(result.returncode,0,result.stderr)
+        for name in ('CONTAINER_HOST','HOME','XDG_DATA_HOME'):
+            self.assertIn(f'skipping {name}',result.stderr)
+        create=self.create()
+        self.assertIn('--unsetenv',create)
+        self.assertEqual(create[create.index('--unsetenv')+1],'CONTAINER_HOST')
+        self.assertNotIn('CONTAINER_HOST',self.forwarded())
+        self.assertEqual([a for a in self.forwarded() if a.startswith(('HOME','XDG'))],[])
 
     def test_entrypoint_home(self):
         stub=self.bin/'opencode'

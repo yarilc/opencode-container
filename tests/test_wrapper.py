@@ -43,6 +43,9 @@ elif args[0] == 'ps':
     else:
         print(os.environ.get('FAKE_NAMES', ''))
     sys.exit(int(os.environ.get('FAKE_PS_STATUS', '0')))
+elif args[0] == 'inspect' and any('HostConfig.Memory' in a for a in args):
+    print(os.environ.get('FAKE_AGENT_BUDGETS', '4294967296 2000000000 512'))
+    sys.exit(int(os.environ.get('FAKE_INSPECT_STATUS', '0')))
 elif args[0] == 'inspect':
     calls = [json.loads(x) for x in log.read_text().splitlines()]
     creates = [c for c in calls if c[0] == 'create']
@@ -166,7 +169,7 @@ class WrapperTests(unittest.TestCase):
         result = self.run_wrapper(FAKE_INFO='true linux false')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('stdin:input payload', result.stdout)
-        self.assertEqual(self.create()[-1].split(':')[0], 'localhost/opencode-sandbox')
+        self.assertEqual(self.create()[-1], 'localhost/opencode-cli:latest')
 
     def test_help_and_arguments(self):
         # Invoke bash explicitly because the wrapper's env shebang needs PATH.
@@ -178,10 +181,15 @@ class WrapperTests(unittest.TestCase):
         self.assertFalse((self.base / 'home').exists())
         self.assertNotIn('deprecated;', result.stderr)
         for needle in ('Container options:', 'Environment:', 'OPENCODE_CONTAINER_IMAGE',
-                       'OPENCODE_CONTAINER_VERSION', 'OPENCODE_CONTAINER_PODMAN ',
+                       'OPENCODE_CONTAINER_PODMAN ',
                        'OPENCODE_CONTAINER_PODMAN_SOCKET', 'OPENCODE_CONTAINER_YOLO',
                        '1/true/yes enable; empty/0/false/no disable',
-                       'including configured ask/deny rules', 'default: 1.18.3',
+                       'including configured ask/deny rules', 'localhost/opencode-cli:latest',
+                       'OPENCODE_CONTAINER_STATE_DIR', 'OPENCODE_CONTAINER_MEMORY_LIMIT', '(default: 4g)',
+                       'OPENCODE_CONTAINER_CPU_LIMIT', '(default: 2)', 'OPENCODE_CONTAINER_PIDS_LIMIT',
+                       '(default: 512)', 'OPENCODE_CONTAINER_RUN_TIMEOUT', '(default: 0',
+                       'OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE', 'drops',
+                       'do not limit workspace or state storage growth', '/mnt/<letter>',
                        'OPENCODE_CONTAINER_PROVIDER', 'OPENCODE_CONTAINER_ENV_VARS',
                        'OPENCODE_CONTAINER_AGENTS_DIR', 'OPENCODE_CONTAINER_SYSTEM_CONFIG',
                        'anthropic, openai, google, openrouter', 'amazon-bedrock',
@@ -300,7 +308,7 @@ class WrapperTests(unittest.TestCase):
                 finally:
                     path.chmod(0o700)
         for variable in ('HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME'):
-            self.log.unlink()
+            self.log.unlink(missing_ok=True)
             self.assertNotEqual(self.run_wrapper(**{variable:'relative'}).returncode, 0)
             self.assert_no_images()
         stat = self.bin/'stat'
@@ -323,17 +331,20 @@ class WrapperTests(unittest.TestCase):
         self.log.unlink(missing_ok=True)
         result=self.run_wrapper(XDG_CONFIG_HOME=str(alias))
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn(f'{target}/opencode:{target}/opencode:rw',self.create())
+        self.assertIn(f'{target}/opencode:/opencode-home/.config/opencode:rw',self.create())
         appbase=self.base/'appbase'; appbase.mkdir()
         renamed=self.base/'elsewhere'/'renamed'; renamed.mkdir(parents=True,mode=0o700)
         (appbase/'opencode').symlink_to(renamed)
         self.log.unlink()
         result=self.run_wrapper(XDG_CONFIG_HOME=str(appbase))
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn(f'{renamed}:{renamed.parent}/opencode:rw',self.create())
+        self.assertIn(f'{renamed}:/opencode-home/.config/opencode:rw',self.create())
         self.log.unlink()
-        self.assertNotEqual(self.run_wrapper(XDG_CONFIG_HOME=str(self.project)).returncode,0)
-        self.assert_no_images()
+        # Shared state below the workspace binds at its own fixed destination.
+        result=self.run_wrapper(XDG_CONFIG_HOME=str(self.project))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn(f'{self.project}/opencode:/opencode-home/.config/opencode:rw',self.create())
+        (self.project/'opencode').rmdir()
 
     def test_mount_paths_and_boundaries(self):
         project=self.base/'parent, spaces'/'workspace, spaces'; project.mkdir(parents=True)
@@ -342,9 +353,10 @@ class WrapperTests(unittest.TestCase):
         result=self.run_wrapper(cwd=project,HOME=str(home),OPENCODE_CONTAINER_AGENTS_DIR='1')
         self.assertEqual(result.returncode,0,result.stderr)
         create=self.create()
-        for path in (project,home/'.config/opencode',home/'.cache/opencode'):
-            self.assertIn(f'{path}:{path}:rw',create)
-        self.assertIn(f'{home/".agents"}:{home/".agents"}:ro',create)
+        self.assertIn(f'{project}:{project}:rw',create)
+        for relative in ('.config/opencode','.cache/opencode'):
+            self.assertIn(f'{home/relative}:/opencode-home/{relative}:rw',create)
+        self.assertIn(f'{home/".agents"}:/opencode-home/.agents:ro',create)
         self.assertFalse(any('.claude' in arg for arg in create))
         self.assertNotIn(f'{home}:{home}:rw',create)
         self.log.unlink()
@@ -367,7 +379,8 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual([create[i+1] for i,v in enumerate(create) if v=='--tmpfs'],
                          ['/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m',
                           '/run:rw,nosuid,nodev,noexec,mode=1777,size=32m',
-                          '/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m'])
+                          '/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m',
+                          '/opencode-home:rw,exec,nosuid,nodev,mode=1777,size=512m'])
         self.assertIn('OPENAI_API_KEY',create); self.assertIn('OPENCODE_SERVER_PASSWORD',create)
         self.assertNotIn('UNLISTED_SECRET',create); self.assertNotIn('ANTHROPIC_API_KEY',create)
         self.assertNotIn('synthetic-secret',self.log.read_text())
@@ -407,7 +420,7 @@ class WrapperTests(unittest.TestCase):
         self.log.unlink()
         result=self.run_wrapper(OPENCODE_CONTAINER_AGENTS_DIR='1')
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn(f'{agents}:{agents}:ro',self.create())
+        self.assertIn(f'{agents}:/opencode-home/.agents:ro',self.create())
 
     def test_missing_opted_in_integration_fails_early(self):
         result=self.run_wrapper(OPENCODE_CONTAINER_AGENTS_DIR='1')
@@ -500,17 +513,21 @@ class WrapperTests(unittest.TestCase):
         self.assertNotIn('CONTAINER_HOST',self.forwarded())
         self.assertEqual([a for a in self.forwarded() if a.startswith(('HOME','XDG'))],[])
 
-    def test_entrypoint_home(self):
-        stub=self.bin/'opencode'
-        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s" "$HOME" "$USER" "$1"\n');stub.chmod(0o755)
-        for home in (str(self.base/'nonstandard'),None):
-            env=self.env.copy()
-            if home is None: env.pop('HOME',None)
-            else: env['HOME']=home
-            result=subprocess.run([str(ROOT/'opencode-entrypoint'),'payload'],env=env,text=True,capture_output=True)
-            self.assertEqual(result.returncode,0,result.stderr)
-            expected=home or '/home/'+subprocess.check_output(['id','-un'],text=True).strip()
-            self.assertEqual(result.stdout,expected+'|'+subprocess.check_output(['id','-un'],text=True).strip()+'|payload')
+    def test_home_layout(self):
+        home=self.base/'nonstandard home'
+        result=self.run_wrapper(HOME=str(home))
+        self.assertEqual(result.returncode,0,result.stderr)
+        create=self.create()
+        env=[create[i+1] for i,v in enumerate(create) if v=='--env']
+        for assignment in ('HOME=/opencode-home','XDG_CONFIG_HOME=/opencode-home/.config',
+                           'XDG_DATA_HOME=/opencode-home/.local/share','XDG_CACHE_HOME=/opencode-home/.cache',
+                           'XDG_STATE_HOME=/opencode-home/.local/state'):
+            self.assertIn(assignment,env)
+        for relative in ('.config','.local/share','.cache','.local/state'):
+            self.assertIn(f'{home/relative/"opencode"}:/opencode-home/{relative}/opencode:rw',create)
+        volumes=[create[i+1] for i,v in enumerate(create) if v=='--volume']
+        self.assertFalse(any(v.split(':')[1].startswith(str(home)) for v in volumes))
+        self.assertIn('/opencode-home:rw,exec,nosuid,nodev,mode=1777,size=512m',create)
 
     def test_deprecated_shim(self):
         shim = ROOT / 'opencode-wrapper'
@@ -541,41 +558,168 @@ class WrapperTests(unittest.TestCase):
                                   'io.opencode-container.workspace-name'])
         self.assertFalse(any(arg.startswith('io.opencode.') for arg in create))
 
-    def test_version_and_image_controls(self):
-        user = '-'.join([subprocess.check_output(['id', '-un'], text=True).strip(),
-                         str(os.getuid()), str(os.getgid())])
-        cases = (({}, '1.18.3', False),
-                 ({'OPENCODE_CONTAINER_VERSION': '1.19.0'}, '1.19.0', False),
-                 ({'OPENCODE_VERSION': '1.17.1'}, '1.17.1', True),
-                 ({'OPENCODE_VERSION': '1.17.1', 'OPENCODE_CONTAINER_VERSION': '1.19.0'}, '1.19.0', False))
-        for env, version, warned in cases:
+    def test_image_and_ignored_version_variables(self):
+        for env in ({'OPENCODE_CONTAINER_VERSION':'1.19.0'},{'OPENCODE_VERSION':'1.17.1'},
+                    {'OPENCODE_CONTAINER_VERSION':'','OPENCODE_VERSION':'x/y'}):
             with self.subTest(env=env):
                 self.log.unlink(missing_ok=True)
-                result = self.run_wrapper(FAKE_IMAGE_STATUS='1', **env)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.create()[-1], f'localhost/opencode-sandbox:{version}-{user}')
-                build = next(c for c in self.calls() if c[0] == 'build')
-                self.assertIn(f'OPENCODE_VERSION={version}', build)
-                self.assertEqual('OPENCODE_VERSION is deprecated' in result.stderr, warned)
+                result=self.run_wrapper(FAKE_IMAGE_STATUS='1',**env)
+                self.assertEqual(result.returncode,0,result.stderr)
+                for name in env:
+                    self.assertEqual(result.stderr.count(f'{name} is ignored; the OpenCode version is pinned in Containerfile'),1)
+                build=next(c for c in self.calls() if c[0]=='build')
+                self.assertNotIn('--build-arg',build)
+                self.assertEqual(self.create()[-1],'localhost/opencode-cli:latest')
         self.log.unlink()
-        custom = 'localhost/opencode-custom:test'
-        result = self.run_wrapper(FAKE_IMAGE_STATUS='1', OPENCODE_CONTAINER_IMAGE=custom)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(['image', 'exists', custom], self.calls())
-        self.assertEqual(next(c for c in self.calls() if c[0] == 'build')[2], custom)
-        self.assertEqual(self.create()[-1], custom)
-        for env in ({'OPENCODE_CONTAINER_VERSION': ''}, {'OPENCODE_CONTAINER_VERSION': 'a/b'},
-                    {'OPENCODE_CONTAINER_VERSION': '1:2'}, {'OPENCODE_VERSION': '1 2'},
-                    {'OPENCODE_CONTAINER_IMAGE': 'bad image'}, {'OPENCODE_CONTAINER_IMAGE': 'bad\timage'}):
-            with self.subTest(invalid=env):
+        custom='localhost/opencode-custom:test'
+        result=self.run_wrapper(FAKE_IMAGE_STATUS='1',OPENCODE_CONTAINER_IMAGE=custom)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn(['image','exists',custom],self.calls())
+        self.assertEqual(next(c for c in self.calls() if c[0]=='build')[2],custom)
+        self.assertEqual(self.create()[-1],custom)
+        for value in ('bad image','bad\timage'):
+            self.log.unlink(missing_ok=True)
+            result=self.run_wrapper(OPENCODE_CONTAINER_IMAGE=value)
+            self.assertEqual(result.returncode,1,result.stderr)
+            self.assertIn('OPENCODE_CONTAINER_IMAGE',result.stderr)
+            self.assertFalse(self.calls())
+        recipe=(ROOT/'Containerfile').read_text()
+        self.assertIn('ARG OPENCODE_VERSION=1.18.3\n',recipe)
+        self.assertNotIn('USER_NAME',recipe)
+        self.assertFalse((ROOT/'opencode-entrypoint').exists())
+
+    def test_isolated_state_directory(self):
+        state=self.base/'isolated'/'state'
+        result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR=str(state),mask=0o022)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(state.stat().st_mode & 0o777,0o700)
+        for relative in ('.config','.local/share','.cache','.local/state'):
+            self.assertEqual((state/relative/'opencode').stat().st_mode & 0o777,0o700)
+        create=self.create()
+        self.assertIn(f'{state}:/opencode-home:rw',create)
+        self.assertFalse(any(a.startswith('/opencode-home:') for a in create))
+        self.assertFalse((self.base/'home').exists())
+        volumes=[create[i+1] for i,v in enumerate(create) if v=='--volume']
+        self.assertEqual(len(volumes),2)
+        foreign=self.base/'shared'; foreign.mkdir(mode=0o755)
+        cases=('relative/state','',str(foreign),str(self.project),str(self.project/'state'),
+               str(self.project.parent),'/bad:colon')
+        for value in cases:
+            with self.subTest(value=value):
                 self.log.unlink(missing_ok=True)
-                result = self.run_wrapper(**env)
-                self.assertEqual(result.returncode, 1, result.stderr)
-                self.assertIn(next(iter(env)), result.stderr)
+                result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR=value)
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('OPENCODE_CONTAINER_STATE_DIR' if value!=str(foreign) else 'must be private',result.stderr)
                 self.assertFalse(self.calls())
-        recipe = (ROOT / 'Containerfile').read_text()
-        self.assertIn('ARG OPENCODE_VERSION=1.18.3\n', recipe)
-        self.assertIn('readonly DEFAULT_OPENCODE_VERSION=1.18.3\n', WRAPPER.read_text())
+        self.assertFalse((self.project/'state').exists())
+        self.assertEqual(foreign.stat().st_mode & 0o777,0o755)
+
+    def test_budgets(self):
+        result=self.run_wrapper()
+        self.assertEqual(result.returncode,0,result.stderr)
+        create=self.create()
+        for flag in ('--memory=4294967296','--cpus=2','--pids-limit=512','--cap-drop=all',
+                     '--security-opt=no-new-privileges'):
+            self.assertIn(flag,create)
+        self.assertNotIn('--timeout',create)
+        inspect=[c for c in self.calls() if c[0]=='inspect' and any('HostConfig.Memory' in a for a in c)]
+        self.assertEqual(len(inspect),1)
+        names=[c[0] for c in self.calls()]
+        self.assertLess(names.index('create'),self.calls().index(inspect[0]))
+        self.assertLess(self.calls().index(inspect[0]),names.index('start'))
+        self.log.unlink()
+        result=self.run_wrapper(OPENCODE_CONTAINER_MEMORY_LIMIT='8g',OPENCODE_CONTAINER_CPU_LIMIT='1.5',
+                                OPENCODE_CONTAINER_PIDS_LIMIT='1024',
+                                FAKE_AGENT_BUDGETS='8589934592 1500000000 1024')
+        self.assertEqual(result.returncode,0,result.stderr)
+        for flag in ('--memory=8589934592','--cpus=1.5','--pids-limit=1024'):
+            self.assertIn(flag,self.create())
+        for env in ({'OPENCODE_CONTAINER_YOLO':'1'},{'OPENCODE_CONTAINER_PODMAN':'1'}):
+            self.log.unlink()
+            self.assertEqual(self.run_wrapper('--container-shell',**env).returncode,0)
+            for flag in ('--memory=4294967296','--cpus=2','--pids-limit=512','--cap-drop=all'):
+                self.assertIn(flag,self.create())
+        invalid={'OPENCODE_CONTAINER_MEMORY_LIMIT':('','  ','0','-1','max','4','4t','1.5g','2000000g'),
+                 'OPENCODE_CONTAINER_CPU_LIMIT':('','0','0.0','-1','1.2345','2000','max','a'),
+                 'OPENCODE_CONTAINER_PIDS_LIMIT':('','0','-1','max','4194305','1.5')}
+        for name,values in invalid.items():
+            for value in values:
+                with self.subTest(name=name,value=value):
+                    self.log.unlink(missing_ok=True)
+                    home=self.base/'budget-home'
+                    result=self.run_wrapper(HOME=str(home),**{name:value})
+                    self.assertEqual(result.returncode,1,result.stderr)
+                    self.assertIn(name,result.stderr)
+                    self.assertFalse(self.calls()); self.assertFalse(home.exists())
+
+    def test_budget_inspection_failures(self):
+        for env in ({'FAKE_AGENT_BUDGETS':'0 0 0'},{'FAKE_AGENT_BUDGETS':'4294967296 2000000000 -1'},
+                    {'FAKE_AGENT_BUDGETS':'1 2000000000 512'},{'FAKE_INSPECT_STATUS':'125'}):
+            with self.subTest(env=env):
+                self.log.unlink(missing_ok=True)
+                result=self.run_wrapper(**env)
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('session not started',result.stderr)
+                names=[c[0] for c in self.calls()]
+                self.assertNotIn('start',names)
+                self.assertIn(['rm','--force','--ignore','--time','0','a'*64],self.calls())
+        self.assertIn('cgroup v2',self.run_wrapper(FAKE_AGENT_BUDGETS='0 0 0').stderr)
+
+    def test_lifetime(self):
+        for value,expected in (('','0'),('0','0'),('60','60'),('7','7')):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                result=self.run_wrapper(OPENCODE_CONTAINER_RUN_TIMEOUT=value)
+                self.assertEqual(result.returncode,0,result.stderr)
+                create=self.create()
+                if expected=='0': self.assertNotIn('--timeout',create)
+                else: self.assertEqual(create[create.index('--timeout')+1],expected)
+        for value in ('-1','1.5','abc','0007','12345678901'):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                result=self.run_wrapper(OPENCODE_CONTAINER_RUN_TIMEOUT=value)
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('OPENCODE_CONTAINER_RUN_TIMEOUT',result.stderr)
+                self.assertFalse(self.calls())
+        slow=self.bin/'podman'
+        original=slow.read_text()
+        slow.write_text(original.replace("elif args[0] == 'start':","elif args[0] == 'start' and os.environ.get('FAKE_SLOW'):\n    time.sleep(float(os.environ['FAKE_SLOW'])); sys.exit(255)\nelif args[0] == 'start':",1))
+        result=self.run_wrapper(OPENCODE_CONTAINER_RUN_TIMEOUT='2',FAKE_SLOW='2.2')
+        self.assertEqual(result.returncode,255,result.stderr)
+        self.assertIn('session lifetime limit reached (2 s); exit status 255',result.stderr)
+        result=self.run_wrapper(OPENCODE_CONTAINER_RUN_TIMEOUT='30',FAKE_EXIT='3')
+        self.assertEqual(result.returncode,3,result.stderr)
+        self.assertNotIn('lifetime',result.stderr)
+
+    def test_sensitive_workspaces(self):
+        home=self.base/'home'; home.mkdir()
+        def refused(cwd, *args, **env):
+            self.log.unlink(missing_ok=True)
+            state=self.base/'guard-state'
+            result=self.run_wrapper(*args,cwd=cwd,HOME=str(home),XDG_CONFIG_HOME=str(state),**env)
+            return result,state
+        for cwd in (home,Path('/'),Path('/etc'),Path('/tmp'),Path('/usr')):
+            with self.subTest(cwd=cwd):
+                result,state=refused(cwd)
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('refusing sensitive workspace',result.stderr)
+                self.assertFalse(self.calls()); self.assertFalse(state.exists())
+        child=home/'project'; child.mkdir()
+        result,_=refused(child,'--container-git-worktree')
+        self.assertEqual(result.returncode,1,result.stderr)
+        link=self.base/'etc-link'; link.symlink_to('/etc')
+        result,_=refused(link)
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('/etc',result.stderr)
+        for value in ('true','yes','01',''):
+            result,_=refused(home,OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=value)
+            self.assertEqual(result.returncode,1,result.stderr)
+        result,_=refused(home,OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE='1')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('WARNING: sensitive workspace explicitly exposed read/write',result.stderr)
+        self.log.unlink()
+        result=self.run_wrapper(cwd=child,HOME=str(home))
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def test_yolo_switch(self):
         allow = 'OPENCODE_PERMISSION={"*":"allow"}'
@@ -626,11 +770,10 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(self.run_wrapper('--container-build').returncode,0)
         build=next(c for c in self.calls() if c[0]=='build')
         self.assertEqual(build[-1],str(ROOT))
-        self.assertIn('OPENCODE_VERSION=1.18.3',build)
         self.assertEqual(build[build.index('--file')+1],str(ROOT/'Containerfile'))
-        for field,cmd in (('USER_NAME',['id','-un']),('USER_ID',['id','-u']),('GROUP_ID',['id','-g'])):
-            self.assertIn(field+'='+subprocess.check_output(cmd,text=True).strip(),build)
-        self.assertTrue(self.create()[-1].startswith('localhost/opencode-sandbox:1.18.3-'))
+        self.assertNotIn('--build-arg',build)
+        self.assertEqual(build[build.index('--tag')+1],'localhost/opencode-cli:latest')
+        self.assertEqual(self.create()[-1],'localhost/opencode-cli:latest')
         self.log.unlink()
         self.assertEqual(self.run_wrapper('--container-build',FAKE_BUILD_STATUS='23').returncode,23)
         self.assertFalse(any(c[0]=='create' for c in self.calls()))

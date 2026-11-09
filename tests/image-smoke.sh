@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 [[ $(id -u) != 0 ]]
-[[ $(id -un) == "$USER" ]]
-for tool in opencode bash curl git jq podman rg; do command -v "$tool" >/dev/null; done
+# The image carries no caller identity: the numeric identity comes from launch.
+[[ $(id -u) == "$EXPECTED_UID" && $(id -g) == "$EXPECTED_GID" ]]
+[[ $HOME == /opencode-home && -n $USER ]]
+for tool in opencode openspec bash bwrap bzip2 curl diff file find gawk git grep jq less nano \
+    patch podman ps python3 rg sed tar unzip xz zip; do command -v "$tool" >/dev/null; done
 [[ $(opencode --version) == 1.18.3 ]]
+[[ $(openspec --version) == 1.16.0 ]]
 [[ -z ${CONTAINER_HOST+x} ]]
 [[ ! -S /run/podman/podman.sock ]]
 [[ $(awk '$2=="/" {print $4}' /proc/mounts) == ro,* ]]

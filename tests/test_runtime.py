@@ -17,7 +17,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / 'opencode-container.sh'
 USER_NAME = subprocess.check_output(['id', '-un'], text=True).strip()
-IMAGE = f'localhost/opencode-sandbox:1.18.3-{USER_NAME}-{os.getuid()}-{os.getgid()}'
+IMAGE = 'localhost/opencode-cli:latest'
 ENABLED = os.environ.get('OPENCODE_RUNTIME_TESTS') == '1'
 
 
@@ -256,6 +256,7 @@ test ! -e "$HOME/.claude"
 test ! -e "$HOME/.agents"
 '''))
         self.assert_success(self.shell('''
+test "$HOME" = /opencode-home
 test ! -e "$HOME/.claude"
 test "$(cat "$HOME/.agents/sentinel")" = readonly
 if touch "$HOME/.agents/write-probe" 2>/dev/null; then exit 20; fi
@@ -275,7 +276,7 @@ test -z "${UNLISTED_SECRET+x}"
         self.assertIn('not forwarding OPENAI_API_KEY',result.stderr)
         self.assertNotIn('synthetic-acceptance',result.stderr)
         shutil.copyfile(ROOT/'tests/image-smoke.sh',self.project/'image-smoke.sh')
-        result=self.shell('bash -x ./image-smoke.sh')
+        result=self.shell(f'EXPECTED_UID={os.getuid()} EXPECTED_GID={os.getgid()} bash -x ./image-smoke.sh')
         self.assert_success(result)
         for relative in ('.config','.local/share','.cache','.local/state'):
             self.assertEqual((self.home/relative/'opencode/sentinel').read_text(),'persistent')
@@ -286,30 +287,104 @@ for name in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME; do
     test "$(cat "$base/opencode/sentinel")" = persistent
 done
 '''))
-        stub=self.project/'stub'; stub.mkdir()
-        (stub/'opencode').write_text('#!/bin/sh\nprintf "%s|%s" "$HOME" "$XDG_CONFIG_HOME"\n')
-        (stub/'opencode').chmod(0o755)
+        # The dedicated home is ephemeral apart from the four state directories.
+        self.assert_success(self.shell('printf scratch > "$HOME/scratch"'))
+        self.assert_success(self.shell('test ! -e "$HOME/scratch"'))
+
+    def test_isolated_state_persists(self):
+        state=self.home/'isolated'
         self.assert_success(self.shell('''
-actual=$(PATH="$PWD/stub:$PATH" /usr/local/bin/opencode-entrypoint --version)
-test "$actual" = "$HOME|$XDG_CONFIG_HOME"
-'''))
+test "$HOME" = /opencode-home
+for name in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME; do
+    eval 'base=$'"$name"
+    test -d "$base/opencode" && test -w "$base/opencode"
+done
+printf kept > "$HOME/notes"
+''',OPENCODE_CONTAINER_STATE_DIR=str(state)))
+        self.assertEqual((state/'notes').read_text(),'kept')
+        self.assertEqual(state.stat().st_mode & 0o777,0o700)
+        self.assertFalse((self.home/'.config/opencode').exists())
+        self.assert_success(self.shell('test "$(cat "$HOME/notes")" = kept',OPENCODE_CONTAINER_STATE_DIR=str(state)))
+
+    def cgroup(self, **env):
+        result=self.shell('''
+grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
+for file in memory.max pids.max cpu.max; do printf '%s=%s\n' "$file" "$(cat /sys/fs/cgroup/$file)"; done
+''',**env)
+        self.assert_success(result)
+        return result.stdout
+
+    def test_effective_hardening_and_budgets(self):
+        for env,(memory,pids,cpu) in (({},('4294967296','512','200000 100000')),
+                                      ({'OPENCODE_CONTAINER_MEMORY_LIMIT':'1g','OPENCODE_CONTAINER_CPU_LIMIT':'1.5',
+                                        'OPENCODE_CONTAINER_PIDS_LIMIT':'256'},('1073741824','256','150000 100000'))):
+            for delegated in ('0','1'):
+                with self.subTest(env=env,delegated=delegated):
+                    extra={'OPENCODE_CONTAINER_PODMAN':delegated}
+                    if delegated=='1': extra['OPENCODE_CONTAINER_PODMAN_SOCKET']=self.socket
+                    out=self.cgroup(**env,**extra)
+                    for field in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):
+                        self.assertRegex(out,field+r':\s*0000000000000000')
+                    self.assertRegex(out,r'NoNewPrivs:\s*1')
+                    self.assertIn('memory.max='+memory,out)
+                    self.assertIn('pids.max='+pids,out)
+                    self.assertIn('cpu.max='+cpu,out)
+
+    def test_process_limit_enforced(self):
+        # A process budget is enforced, not just reported.
+        result=self.shell('python3 - <<\'CHECK\'\nimport subprocess\nchildren = []\ntry:\n'
+                          '    for _ in range(80):\n        children.append(subprocess.Popen(["sleep", "30"]))\n'
+                          'except (BlockingIOError, OSError):\n    print("PIDS_BUDGET_ENFORCED")\n'
+                          'finally:\n    [child.kill() for child in children]\nCHECK\n',
+                          OPENCODE_CONTAINER_PIDS_LIMIT='32')
+        self.assert_success(result)
+        self.assertIn('PIDS_BUDGET_ENFORCED',result.stdout)
+
+    def test_tools_without_capabilities(self):
+        result=self.shell('''git init -q repo && git -C repo -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m x
+openspec --version >/dev/null
+bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true && echo BWRAP_OK
+podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && echo DELEGATED_CHILD_OK
+''',OPENCODE_CONTAINER_PODMAN='1',OPENCODE_CONTAINER_PODMAN_SOCKET=self.socket)
+        self.assert_success(result)
+        for marker in ('BWRAP_OK','DELEGATED_CHILD_OK'):
+            self.assertIn(marker,result.stdout)
+
+    def test_lifetime_limit(self):
+        before=time.monotonic()
+        result=self.shell('sleep 30',OPENCODE_CONTAINER_RUN_TIMEOUT='3')
+        elapsed=time.monotonic()-before
+        self.assertNotEqual(result.returncode,0)
+        self.assertLess(elapsed,25)
+        self.assertIn('session lifetime limit reached (3 s); exit status',result.stderr)
+        self.lifetime_status=result.returncode
+        print(f'lifetime expiry status: {result.returncode}')
+        result=self.shell('exit 4',OPENCODE_CONTAINER_RUN_TIMEOUT='30')
+        self.assertEqual(result.returncode,4)
+        self.assertNotIn('lifetime',result.stderr)
+
+    def test_sensitive_home_refused(self):
+        result=subprocess.run([str(WRAPPER),'--container-shell'],input='exit 0\n',capture_output=True,text=True,
+                              cwd=self.home,env=self.env,timeout=60)
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('refusing sensitive workspace',result.stderr)
 
     def test_build_context(self):
         context=self.base/'context';context.mkdir()
         shutil.copyfile(ROOT/'.containerignore',context/'.containerignore')
-        shutil.copyfile(ROOT/'opencode-entrypoint',context/'opencode-entrypoint')
-        for name in ('unknown','.env','.git/config','auth.json','.local/state/token',
+        for name in ('unknown','.env','.git/config','auth.json','.local/state/token','opencode-entrypoint',
                      'nested/Containerfile','nested/opencode-entrypoint','nested/.containerignore'):
             path=context/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('SYNTHETIC')
         recipe=context/'Containerfile'
-        recipe.write_text('FROM '+IMAGE+'\nUSER root\nCOPY opencode-entrypoint /required\nCOPY . /context\n'
-                          'RUN test -f /required && test "$(find /context -type f | wc -l)" = 3\n')
+        recipe.write_text('FROM '+IMAGE+'\nUSER root\nCOPY . /context\n'
+                          'RUN test "$(find /context -type f | wc -l)" = 2 && test -f /context/Containerfile '
+                          '&& test -f /context/.containerignore\n')
         iid=self.base/'context-iid'
         try:
             self.assert_success(self.engine('build','--no-cache','--iidfile',str(iid),str(context),timeout=180))
         finally:
             if iid.exists():self.engine('rmi','--force',iid.read_text().strip())
-        recipe.write_text('FROM '+IMAGE+'\nCOPY unknown /must-not-exist\n')
+        recipe.write_text('FROM '+IMAGE+'\nCOPY opencode-entrypoint /must-not-exist\n')
         self.assertNotEqual(self.engine('build',str(context),timeout=90).returncode,0)
 
     def test_image_default_host_is_removed(self):

@@ -90,7 +90,7 @@ The first invocation builds the image. Wrapper options:
 
 | Option | Effect |
 | --- | --- |
-| `--container-build` | refresh the versioned per-user image, then start the selected session |
+| `--container-build` | rebuild the image from the pinned inputs, then start the selected session |
 | `--container-shell` | bypass the OpenCode entrypoint and open `/bin/bash`, omitting all OpenCode arguments |
 | `--container-git-worktree` | expose the physical current directory's entire immediate parent read/write, retaining the original physical working directory and naming basename |
 | `--container-help` | wrapper help without engine or state side effects |
@@ -99,20 +99,18 @@ Normal `--help` remains an OpenCode argument. Other OpenCode arguments keep
 their order and boundaries. The host must provide GNU coreutils `timeout` for
 bounded session cleanup.
 
-### Image and version
+### Image
 
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `OPENCODE_CONTAINER_IMAGE` | `localhost/opencode-sandbox:<version>-<user>-<uid>-<gid>` | image inspected, built and run |
-| `OPENCODE_CONTAINER_VERSION` | `1.18.3` | OpenCode version built into the default tag |
+`OPENCODE_CONTAINER_IMAGE` selects the image name (default
+`localhost/opencode-cli:latest`). One generic image serves every user: the
+numeric identity is set at launch with `--userns=keep-id --user UID:GID`, and the
+image contains no user name, UID, GID or entrypoint script. A missing image is
+built automatically on first launch.
 
-The version must match `[A-Za-z0-9][A-Za-z0-9._-]*`. The deprecated
-`OPENCODE_VERSION` is still read, with a warning, when
-`OPENCODE_CONTAINER_VERSION` is unset:
-
-```bash
-OPENCODE_CONTAINER_VERSION=1.18.3 opencode --version
-```
+OpenCode and OpenSpec versions are pinned in `Containerfile` (see
+[Updating pinned image inputs](#updating-pinned-image-inputs)).
+`OPENCODE_CONTAINER_VERSION` and the older `OPENCODE_VERSION` are ignored with a
+warning.
 
 ### YOLO mode
 
@@ -182,13 +180,25 @@ assignments; `--env-host` is never used. Three sources are forwarded:
 
 ### Migrating from earlier releases
 
-Earlier releases used `opencode-wrapper`, `OPENCODE_VERSION`, `Dockerfile`
-and `io.opencode.*` labels. They also mounted `~/.claude`, `~/.agents` and
-`/etc/opencode` whenever they existed, and forwarded every set Anthropic,
-OpenAI, Google/Gemini, OpenRouter, AWS, Azure and GitHub variable.
+Earlier releases used `opencode-wrapper`, `OPENCODE_VERSION`, `Dockerfile`,
+`io.opencode.*` labels and per-user `localhost/opencode-sandbox:*` images built
+on the Alpine `ghcr.io/anomalyco/opencode` image, with `HOME` set to the host
+home path. They also mounted `~/.claude`, `~/.agents` and `/etc/opencode`
+whenever they existed, and forwarded every set Anthropic, OpenAI, Google/Gemini,
+OpenRouter, AWS, Azure and GitHub variable.
 
 - Point aliases to `opencode-container.sh`; `opencode-wrapper` warns.
-- Replace `OPENCODE_VERSION` with `OPENCODE_CONTAINER_VERSION`.
+- The first launch builds `localhost/opencode-cli:latest`. Remove old per-user
+  images when no longer needed: `podman image ls localhost/opencode-sandbox`
+  lists them and `podman image rm <image>` removes one.
+- Drop `OPENCODE_CONTAINER_VERSION` and `OPENCODE_VERSION`; they are ignored.
+- OpenCode state stays in the host XDG directories and is now seen at
+  `/opencode-home/...` inside the session; nothing has to be copied.
+- Launching from your home directory or a drive root such as `/mnt/d` is now
+  refused; launch from a project directory or set exact
+  `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1`.
+- Sessions now have memory and CPU budgets besides the process limit; hosts
+  need delegated rootless cgroup v2 `cpu`, `memory` and `pids` controllers.
 - Session containers are now labeled `io.opencode-container.*`. Inspect current
   sessions with `podman ps --all --filter label=io.opencode-container.managed=true`
   and containers left by earlier releases with
@@ -208,28 +218,46 @@ OpenAI, Google/Gemini, OpenRouter, AWS, Azure and GitHub variable.
 - Set `OPENCODE_CONTAINER_AGENTS_DIR=1` or `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`
   to keep the other integrations.
 
-Existing per-user images keep their tags; no rebuild is required.
-
 ## Mounts and security
 
-The physical workspace and four OpenCode XDG directories are host-writable:
-`$XDG_CONFIG_HOME/opencode`, `$XDG_DATA_HOME/opencode`,
-`$XDG_CACHE_HOME/opencode`, and `$XDG_STATE_HOME/opencode`. Unset/empty XDG
-bases default to `$HOME/.config`, `$HOME/.local/share`, `$HOME/.cache`, and
-`$HOME/.local/state`. HOME and nonempty XDG bases must be absolute.
+Sessions use the dedicated home `HOME=/opencode-home`, with
+`XDG_CONFIG_HOME=/opencode-home/.config`, `XDG_DATA_HOME=/opencode-home/.local/share`,
+`XDG_CACHE_HOME=/opencode-home/.cache` and `XDG_STATE_HOME=/opencode-home/.local/state`.
+The physical workspace keeps its host absolute path.
+
+By default `/opencode-home` is an ephemeral 512 MiB tmpfs, and the caller's four
+host OpenCode XDG directories are mounted read/write below it:
+
+| Host source | Session path |
+| --- | --- |
+| `$XDG_CONFIG_HOME/opencode` | `/opencode-home/.config/opencode` |
+| `$XDG_DATA_HOME/opencode` | `/opencode-home/.local/share/opencode` |
+| `$XDG_CACHE_HOME/opencode` | `/opencode-home/.cache/opencode` |
+| `$XDG_STATE_HOME/opencode` | `/opencode-home/.local/state/opencode` |
+
+Unset/empty host XDG bases default to `$HOME/.config`, `$HOME/.local/share`,
+`$HOME/.cache`, and `$HOME/.local/state`. HOME and nonempty XDG bases must be
+absolute. Other files written below `/opencode-home` do not survive the session.
 
 Missing state directories are created privately with a scoped umask. Every
 resolved state directory must belong to the caller, permit read/write/traverse,
 and deny all group/other permissions. Existing insecure directories cause a
 preflight failure before image operations: the wrapper never chmods/chowns them
 or imports credentials. Correct permissions manually or select private native
-Linux storage when WSL/DrvFS does not enforce Unix modes.
+Linux storage when WSL/DrvFS does not enforce Unix modes. Symlinked host XDG
+bases and differently named symlink targets are resolved physically before they
+are mounted at the fixed session paths. Conflicting mount destinations are
+rejected.
 
-The entrypoint preserves supplied HOME, including nonstandard homes. XDG bases
-are normalized to physical state parents. Symlinked application directories
-whose target is differently named bind at `<physical-parent>/opencode` so the
-application still finds its validated state. Conflicting mount destinations
-are rejected. No writable home outside declared mounts is introduced.
+### Isolated state
+
+`OPENCODE_CONTAINER_STATE_DIR=/absolute/path` replaces the shared host XDG state
+for that launch: the directory becomes the persistent `/opencode-home`, and the
+four OpenCode directories are created inside it. The wrapper creates it
+privately when missing and validates it with the same ownership and mode rules,
+before any engine query. It must not equal, contain or lie inside the
+workspace mount. The host XDG OpenCode directories are not mounted in this mode,
+and no credentials are copied: authenticate again with `opencode auth login`.
 
 `$HOME/.agents` and `/etc/opencode` are optional read-only integrations,
 mounted only on exact opt-in:
@@ -258,7 +286,38 @@ The main container runs with:
   executable `/tmp` (512 MiB) for OpenTUI shared-library loading, noexec
   `/var/tmp` (512 MiB), and noexec `/run` (32 MiB);
 - `--read-only-tmpfs=false` to disable automatic writable temporary mounts;
-- a process limit.
+- memory, CPU and process budgets (see below).
+
+### Session hardening, budgets and lifetime
+
+| Variable | Default | Accepted values |
+| --- | --- | --- |
+| `OPENCODE_CONTAINER_MEMORY_LIMIT` | `4g` | positive integer with unit `k`, `m` or `g`, up to 1 PiB |
+| `OPENCODE_CONTAINER_CPU_LIMIT` | `2` | positive number with at most 3 decimals, up to 1024 |
+| `OPENCODE_CONTAINER_PIDS_LIMIT` | `512` | integer from 1 to 4194304 |
+| `OPENCODE_CONTAINER_RUN_TIMEOUT` | `0` (disabled) | whole seconds, at most 10 digits |
+| `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE` | unset | exactly `1` permits a refused workspace |
+
+Only an unset budget selects its default; no value disables a budget. Invalid
+values stop with status 1 before any engine query or state creation. After
+creating the container the wrapper inspects it and starts it only when the
+configured memory, CPU and process limits equal the selected budgets; otherwise
+it removes its own container and names rootless cgroup v2 `cpu`/`memory`/`pids`
+controller delegation. Budgets and tmpfs sizes do not limit workspace or state
+storage growth.
+
+`OPENCODE_CONTAINER_RUN_TIMEOUT` sets Podman's native container lifetime. When
+it stops a session, the wrapper prints a notice and keeps the engine client's
+exit status (255 on Podman 4.9.3). The notice compares whole seconds, so with a
+1-second limit a fast non-zero exit can print it; the status is never altered.
+
+The writable workspace, or the worktree parent, must not physically be `/`,
+`/home`, `/root`, `/etc`, `/usr`, `/var`, `/bin`, `/sbin`, `/lib`, `/lib64`,
+`/boot`, `/opt`, `/srv`, `/mnt`, `/media`, `/proc`, `/sys`, `/dev`, `/run`,
+`/tmp`, the caller's physical home or a `/mnt/<letter>` drive root.
+Descendants such as `/mnt/d/project` are allowed. Exact
+`OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1` permits a refused directory with
+a warning; it relaxes no other check.
 
 The rootless Podman socket still gives OpenCode full control over the user's
 Podman engine. A process deliberately using the API can access host paths that
@@ -266,36 +325,45 @@ the user can read. Leave session delegation disabled when it is unnecessary.
 
 ## Included Tools
 
-The image is built from `Containerfile` on the official
-`ghcr.io/anomalyco/opencode` image at the selected version, adding Bash,
-CA certificates, curl, Git, jq, the Podman remote client (as `podman`) and
-ripgrep. The image creates the host user's username and numeric UID/GID.
+`Containerfile` builds one generic image on
+`docker.io/library/node:22-bookworm-slim`, pinned by digest, with OpenCode
+(`opencode-ai`) and OpenSpec (`@fission-ai/openspec`) installed from npm at exact
+versions, plus `bash`, `bubblewrap`, `bzip2`, `ca-certificates`, `coreutils`,
+`curl`, `diffutils`, `file`, `findutils`, `gawk`, `git`, `grep`, `jq`, `less`,
+`nano`, `patch`, `podman`, `procps`, `python3`, `ripgrep`, `sed`, `tar`, `unzip`,
+`util-linux`, `xz-utils` and `zip`. npm verifies each package's registry
+integrity; the platform binary packages are exact-version dependencies of
+`opencode-ai`. OpenTUI runs on glibc and needs the executable `/tmp`.
 
-Default tags contain the OpenCode version, username, UID and GID. Only
-image-exists status 1 triggers an automatic build; other engine/storage errors
-stop startup. Explicit refresh still performs all preflights first. Builds use
-the wrapper's physical recipe directory.
+The npm install step selects the x64 AVX2 or baseline OpenCode binary from the
+build host's CPU. Build the image on the host that runs it; do not copy an image
+built on an AVX2 host to a host without AVX2.
+
+Only image-exists status 1 triggers an automatic build; other engine/storage
+errors stop startup. Explicit refresh still performs all preflights first.
+Builds use the wrapper's physical recipe directory and pass no build arguments.
 
 The sole `.containerignore` defaults to denying all inputs and allows only root
-`Containerfile`, `opencode-entrypoint`, and `.containerignore`. Update this
-allowlist deliberately for any future local COPY input; nested lookalikes,
-credentials, state and unrelated files must remain excluded.
+`Containerfile` and `.containerignore`; the image needs no local COPY input.
+Update this allowlist deliberately for any future local input; nested
+lookalikes, credentials, state and unrelated files must remain excluded.
 
-### Updating
+### Updating pinned image inputs
 
-The version is defined in `opencode-container.sh` (`DEFAULT_OPENCODE_VERSION`)
-and in `Containerfile` (`ARG OPENCODE_VERSION`); a unit test keeps them equal.
+`Containerfile` records `OPENCODE_VERSION`, `OPENSPEC_VERSION` and the base
+image digest; `tests/test_image_pins.py` rejects floating inputs. To update:
 
-To update:
-
-1. Change both version values.
-2. Re-read the provider metadata of the new version and update the provider
-   table if needed.
-3. Remove or rebuild the previous image tag.
-4. Verify `opencode --version`.
+1. Change the recorded version or digest in `Containerfile`.
+2. Re-read the provider metadata of the new OpenCode version and update the
+   `OPENCODE_CONTAINER_PROVIDER` table if needed.
+3. Re-check how the new version merges `OPENCODE_PERMISSION` (YOLO) and parses
+   flags such as `--auto`.
+4. Rebuild explicitly with `--container-build`.
+5. Rerun the credential-free and real-engine checks, including OpenTUI.
+6. Record the tested versions with the date in `docs/validation.md`.
 
 Do not run `opencode upgrade` inside the container: the main filesystem is
-immutable.
+immutable and automatic updates are disabled.
 
 ## Session lifecycle
 
@@ -329,37 +397,32 @@ Run static checks first, then the synthetic suite (Python standard library only)
 ```bash
 bash -n opencode-container.sh
 bash -n opencode-wrapper
-bash -n opencode-entrypoint
-python3 -m unittest discover -s tests -p test_wrapper.py -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 Synthetic tests use a fake Podman, disposable HOME/XDG, dummy credential strings,
 and filesystem socket fixtures; they do not contact the real engine.
-Real rootless acceptance requires the current-user image and a running rootless
+Real rootless acceptance requires the built image and a running rootless
 Unix service. `tests/run-runtime.sh` runs the tests through Podman, mounting the
 workspace at its host absolute path and a disposable private Linux state volume.
 It defaults to the neighboring project's `localhost/claude-code:latest` as a
 tooling image because the OpenCode production image intentionally lacks Python.
 Override `OPENCODE_TEST_TOOLS_IMAGE` with an available Linux image providing
 Python 3.11+, Bash, GNU coreutils timeout, Git, Podman remote, and a passwd entry
-for the invoking numeric UID/GID. Tests build/check the per-user OpenCode tag
-for the username inside that tooling container. The runner never imports host
+for the invoking numeric UID/GID. The runner never imports host
 application credentials or changes service/policy setup.
 
 ```bash
-podman build \
-  --tag localhost/opencode-sandbox:1.18.3-$(id -un)-$(id -u)-$(id -g) \
-  --build-arg OPENCODE_VERSION=1.18.3 \
-  --build-arg USER_NAME=$(id -un) \
-  --build-arg USER_ID=$(id -u) \
-  --build-arg GROUP_ID=$(id -g) .
+./opencode-container.sh --container-build --version
 ./tests/run-runtime.sh
 ```
 
 The real suite exercises mount flags/capacities/lifetime, identity, state,
 context filtering, concurrency, signals, stdin, worktrees, delegation and
 remapping, version output, the YOLO permission, labels, the deprecated alias,
-and actual OpenTUI startup/quit through a PTY.
+effective capabilities and cgroup budgets, process-limit enforcement, the
+lifetime limit, the refused home workspace, shared and isolated state, the tool
+inventory, and actual OpenTUI startup/quit through a PTY.
 The renderer uses a disposable home with no provider credentials. Its ignored
 `.test-state/renderer-last.txt` transcript is available for local inspection.
 Synthetic and runtime results are recorded separately in

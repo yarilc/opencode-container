@@ -1,9 +1,0 @@
-#!/bin/sh
-
-set -eu
-
-USER=$(id -un)
-export USER
-export HOME="${HOME:-/home/${USER}}"
-
-exec opencode "$@"

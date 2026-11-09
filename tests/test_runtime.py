@@ -15,7 +15,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = ROOT / 'opencode-wrapper'
+WRAPPER = ROOT / 'opencode-container.sh'
 USER_NAME = subprocess.check_output(['id', '-un'], text=True).strip()
 IMAGE = f'localhost/opencode-sandbox:1.18.3-{USER_NAME}-{os.getuid()}-{os.getgid()}'
 ENABLED = os.environ.get('OPENCODE_RUNTIME_TESTS') == '1'
@@ -114,7 +114,7 @@ class RuntimeTests(unittest.TestCase):
 
     def engine(self, *args, **kwargs):
         if args and args[0] in ('create','run'):
-            args=(args[0],'--label','io.opencode.acceptance='+self.base.name,*args[1:])
+            args=(args[0],'--label','io.opencode-container.acceptance='+self.base.name,*args[1:])
         return subprocess.run(['podman', *args], capture_output=True, text=True,
                               timeout=kwargs.pop('timeout', 30), **kwargs)
 
@@ -296,12 +296,12 @@ test "$actual" = "$HOME|$XDG_CONFIG_HOME"
 
     def test_build_context(self):
         context=self.base/'context';context.mkdir()
-        shutil.copyfile(ROOT/'.dockerignore',context/'.dockerignore')
+        shutil.copyfile(ROOT/'.containerignore',context/'.containerignore')
         shutil.copyfile(ROOT/'opencode-entrypoint',context/'opencode-entrypoint')
         for name in ('unknown','.env','.git/config','auth.json','.local/state/token',
-                     'nested/Dockerfile','nested/opencode-entrypoint','nested/.dockerignore'):
+                     'nested/Containerfile','nested/opencode-entrypoint','nested/.containerignore'):
             path=context/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('SYNTHETIC')
-        recipe=context/'Dockerfile'
+        recipe=context/'Containerfile'
         recipe.write_text('FROM '+IMAGE+'\nUSER root\nCOPY opencode-entrypoint /required\nCOPY . /context\n'
                           'RUN test -f /required && test "$(find /context -type f | wc -l)" = 3\n')
         iid=self.base/'context-iid'
@@ -316,10 +316,10 @@ test "$actual" = "$HOME|$XDG_CONFIG_HOME"
         version='acceptance-'+self.base.name
         tag=f'localhost/opencode-sandbox:{version}-{USER_NAME}-{os.getuid()}-{os.getgid()}'
         context=self.base/'env-context';context.mkdir()
-        (context/'Dockerfile').write_text('FROM '+IMAGE+'\nENV CONTAINER_HOST=unix:///image-default.sock\n')
+        (context/'Containerfile').write_text('FROM '+IMAGE+'\nENV CONTAINER_HOST=unix:///image-default.sock\n')
         try:
             self.assert_success(self.engine('build','--tag',tag,str(context),timeout=90))
-            self.assert_success(self.shell('test -z "${CONTAINER_HOST+x}"',OPENCODE_VERSION=version))
+            self.assert_success(self.shell('test -z "${CONTAINER_HOST+x}"',OPENCODE_CONTAINER_IMAGE=tag))
         finally:
             self.engine('rmi','--force',tag)
 
@@ -330,7 +330,7 @@ test "$actual" = "$HOME|$XDG_CONFIG_HOME"
         visible='/run/opencode-test/socket.sock'
         # The caller needs host tooling; select the same runner image explicitly.
         runner=os.environ.get('OPENCODE_TEST_TOOLS_IMAGE','localhost/claude-code:latest')
-        command=['podman','run','--rm','--label','io.opencode.acceptance='+self.base.name,'--interactive','--read-only','--userns=keep-id',
+        command=['podman','run','--rm','--label','io.opencode-container.acceptance='+self.base.name,'--interactive','--read-only','--userns=keep-id',
                  '--user',f'{os.getuid()}:{os.getgid()}', '--volume',f'{ROOT}:{ROOT}:ro',
                  '--volume',f'{self.base}:{self.base}:rw','--volume',f'{self.home}:{self.home}:rw',
                  '--volume',f'{host_socket}:{visible}:rw','--env','CONTAINER_HOST=unix://'+visible,
@@ -346,6 +346,52 @@ test "$actual" = "$HOME|$XDG_CONFIG_HOME"
                               capture_output=True,text=True,timeout=60)
         self.assert_success(result)
         self.assertEqual(result.stdout.strip(),'1.18.3')
+
+    def resolved_permission(self, **env):
+        result=subprocess.run([str(WRAPPER),'debug','config'],env=self.env|{'OPENCODE_DISABLE_AUTOUPDATE':'1',
+                              'OPENCODE_DISABLE_MODELS_FETCH':'1','OPENCODE_DISABLE_DEFAULT_PLUGINS':'1'}|env,
+                              cwd=self.project,capture_output=True,text=True,timeout=120)
+        self.assert_success(result)
+        import json
+        return json.loads(result.stdout[result.stdout.index('{'):]).get('permission')
+
+    def test_yolo_resolved_permission(self):
+        # The pinned OpenCode merges OPENCODE_PERMISSION into its resolved configuration.
+        self.assertEqual(self.resolved_permission(OPENCODE_CONTAINER_YOLO='1'),{'*':'allow'})
+        self.assertNotEqual(self.resolved_permission(),{'*':'allow'})
+
+    def owned_ids(self, all_states=False):
+        # Workspace paths contain commas, which label filters cannot express.
+        listing=self.engine('ps',*(['--all'] if all_states else []),'--filter','label=io.opencode-container.managed=true',
+                            '--format','{{.ID}} {{index .Labels "io.opencode-container.workspace"}}').stdout
+        return ' '.join(line.split(' ',1)[0] for line in listing.splitlines()
+                        if line.split(' ',1)[1:]==[str(self.project)])
+
+    def test_labels_and_deprecated_shim(self):
+        shim=ROOT/'opencode-wrapper'
+        script='''
+for i in $(seq 1 100); do test -e "$PWD/ready" && break; sleep 0.1; done
+'''
+        process=subprocess.Popen([str(shim),'--container-shell'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,text=True,env=self.env,cwd=self.project)
+        try:
+            deadline=time.monotonic()+60; ids=''
+            while time.monotonic()<deadline and not ids:
+                ids=self.owned_ids()
+                time.sleep(0.2)
+            self.assertTrue(ids,'session container not found by the new label')
+            labels=self.engine('inspect','--format','{{json .Config.Labels}}',ids.split()[0]).stdout
+            import json
+            keys=[k for k in json.loads(labels) if k.startswith('io.opencode')]
+            self.assertTrue(keys)
+            self.assertTrue(all(k.startswith('io.opencode-container.') for k in keys),keys)
+            (self.project/'ready').write_text('')
+            out,err=process.communicate('set -e\n'+script+'exit 7\n',timeout=60)
+        finally:
+            if process.poll() is None: process.kill(); process.wait()
+        self.assertEqual(process.returncode,7,err)
+        self.assertEqual(err.count('opencode-wrapper: deprecated; use opencode-container.sh'),1)
+        self.assertEqual(self.owned_ids(all_states=True),'')
 
     def test_opentui_renderer(self):
         env=self.env|{'TERM':'xterm-256color','OPENCODE_DISABLE_AUTOUPDATE':'1',

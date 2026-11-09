@@ -204,3 +204,63 @@ Initial failures and reruns (all in the tests, not the wrapper):
 Unit suites run in a runner container with an executable tmpfs `/tmp`, because
 the agent sandbox mounts `/tmp` `noexec` and cannot bind Unix sockets on its
 workspace filesystem.
+
+## Common wrapper baseline (A01, A02, A08, A09): 2026-11-09
+
+Change `align-wrapper-baseline` (Wave 2). Host: rootless Podman 4.9.3 server.
+Session image `localhost/opencode-sandbox:1.18.3-node-1000-1000` (`36a4ca917807`)
+rebuilt from the renamed `Containerfile` with an identical ID, runner
+`localhost/claude-code:latest` (`7cd81e8ccd06`). No credentials, provider login
+or model requests were used.
+
+User-facing changes:
+- `opencode-container.sh` is the entry point, and `opencode-wrapper` is a
+  deprecated shim that warns once and execs it;
+- `Containerfile`/`.containerignore` replace `Dockerfile`/`.dockerignore`;
+- `OPENCODE_CONTAINER_IMAGE` is new;
+- `OPENCODE_CONTAINER_VERSION` replaces `OPENCODE_VERSION`, which is still read
+  with a warning;
+- `OPENCODE_CONTAINER_YOLO` is new;
+- labels move to `io.opencode-container.*`.
+
+Measured OpenCode 1.18.3 facts, on `ghcr.io/anomalyco/opencode:1.18.3` with
+the network disabled:
+- `opencode --auto debug paths` and an unknown flag before a subcommand fail.
+  `--auto`, `--yolo` and `--dangerously-skip-permissions` exist only on the
+  default interface and `run`.
+- `OPENCODE_PERMISSION` is parsed as JSON and merged after the configuration
+  files. With a configuration containing `bash: {"rm *": "deny"}` and
+  `edit: "ask"`, `opencode debug agent build` lists
+  `{"permission":"*","action":"allow"}` after the user rules. YOLO therefore
+  overrides configured `ask`/`deny` rules, as the other wrappers' native bypass
+  flags do.
+
+| Check | Result |
+| --- | --- |
+| `tests/test_wrapper.py` (runner container) | 30 tests, OK (4 new: shim, labels, version/image, YOLO) |
+| Full unit discovery (runtime tests skipped without opt-in) | 43 tests, OK (13 skipped) |
+| `bash tests/run-runtime.sh` (real rootless engine) | 13 tests, OK; OpenTUI welcome prompt observed |
+| `bash -n` (wrapper, shim, entrypoint), ShellCheck on all shell files, `git diff --check` | Passed |
+| `AGENTS.md` build command | Succeeded with the renamed recipe |
+| Managed containers after the runs (old and new labels) | None |
+
+New real-engine checks:
+- `opencode debug config` in a real session reports permission
+  `{"*":"allow"}` with YOLO, and not without it;
+- a session started through the `opencode-wrapper` shim carries only
+  `io.opencode-container.*` labels, exits with the shell status, prints one
+  deprecation warning and leaves no container;
+- the build-context probe passes with `Containerfile` and `.containerignore`.
+
+Initial failures and reruns:
+- An earlier editing attempt failed before changing any file, because a nested
+  heredoc ended the outer one.
+- The first shim runtime check could not find the session: Podman label
+  filters cannot express the test workspace path, which contains a comma. The
+  check now filters on `io.opencode-container.managed=true` and compares the
+  workspace label in Python.
+
+README and `AGENTS.md` were reorganized into the common section structure. Every
+statement of the previous files was checked against the new text with a
+sentence-level comparison. The remaining differences are retitled sections,
+statements moved into tables, and the intended renames.

@@ -9,9 +9,9 @@ socket=$(podman info --format '{{.Host.RemoteSocket.Path}}')
 volume=''
 cleanup() { [[ -z "$volume" ]] || podman volume rm "$volume" >/dev/null; }
 trap cleanup EXIT
-volume=$(podman volume create --label io.opencode.acceptance=runner)
+volume=$(podman volume create --label io.opencode-container.acceptance=runner)
 state_root=$(podman volume inspect --format '{{.Mountpoint}}' "$volume")
-podman run --rm --label io.opencode.acceptance=runner --interactive --userns=keep-id --user "$(id -u):$(id -g)" \
+podman run --rm --label io.opencode-container.acceptance=runner --interactive --userns=keep-id --user "$(id -u):$(id -g)" \
     --volume "$root:$root:rw" --volume "$state_root:$state_root:rw" \
     --volume "$socket:/run/podman/podman.sock:rw" --workdir "$root" \
     --env CONTAINER_HOST=unix:///run/podman/podman.sock \

@@ -258,7 +258,7 @@ remapping, version output, and actual OpenTUI startup/quit through a PTY.
 The renderer uses a disposable home with no provider credentials. Its ignored
 `.test-state/renderer-last.txt` transcript is available for local inspection.
 Synthetic and runtime results are recorded separately in
-[the acceptance report](docs/sandbox-acceptance.md). Version output alone does
+[the acceptance report](docs/validation.md). Version output alone does
 not initialize OpenTUI and cannot establish renderer compatibility.
 
 Inspect remaining containers with `podman ps --all --filter

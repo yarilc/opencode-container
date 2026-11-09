@@ -1,4 +1,4 @@
-# sandbox-storage Specification
+# container-isolation Specification
 
 ## Purpose
 

@@ -133,7 +133,7 @@ GNU timeout, Git, Podman remote, and a passwd entry for the invoking identity.
 The production OpenCode image does not need Python. The per-user tag must match
 the tooling container's username/UID/GID. Tests never import actual credentials.
 Keep synthetic evidence separate from real acceptance in
-`docs/sandbox-acceptance.md`. Check OpenTUI startup and quit interactively in a
+`docs/validation.md`. Check OpenTUI startup and quit interactively in a
 PTY in addition to version output, and inspect test-owned resources afterward.
 Temporary transcripts and Python caches are ignored by `.gitignore`; production
 build inputs remain governed solely by `.dockerignore`.

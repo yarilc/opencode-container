@@ -120,3 +120,18 @@ for manual inspection. The previously documented Alpine existing-GID collision
 is outside this change. Socket access still delegates the service user's full
 Podman authority, and by-name forwarding does not hide secrets from engine
 inspection or container processes.
+
+## Common specification names: 2026-11-09
+
+The OpenSpec capabilities were renamed to the scheme shared by the five wrappers (Wave 1, `sandbox-ref-2`). Requirements and scenarios are unchanged; only directory names and spec titles changed. Earlier sections and archived changes keep the names that were current at the time.
+
+| Previous name | Current name |
+| --- | --- |
+| `wrapper-interface` | `container-launcher` |
+| `session-lifecycle` | `container-session` |
+| `engine-authority` | `container-podman-access` |
+| `sandbox-storage` | `container-isolation` |
+
+The evidence file was renamed from `docs/sandbox-acceptance.md` to `docs/validation.md`, the common name across the five wrappers; its earlier content is unchanged.
+
+`openspec validate --specs` passed: 4 specs, 0 failures.

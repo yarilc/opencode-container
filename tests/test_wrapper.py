@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-WRAPPER = ROOT / 'opencode-wrapper'
+WRAPPER = ROOT / 'opencode-container.sh'
 FAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys, time, signal
 args = sys.argv[1:]
@@ -47,7 +47,7 @@ elif args[0] == 'inspect':
     calls = [json.loads(x) for x in log.read_text().splitlines()]
     creates = [c for c in calls if c[0] == 'create']
     token = next((c[i+1].split('=',1)[1] for c in creates for i,a in enumerate(c[:-1])
-                  if a=='--label' and c[i+1].startswith('io.opencode.session=')), '')
+                  if a=='--label' and c[i+1].startswith('io.opencode-container.session=')), '')
     print(os.environ.get('FAKE_OWNER',token))
 elif args[0] == 'create':
     mode = os.environ.get('FAKE_CREATE_MODE', '')
@@ -125,7 +125,7 @@ elif args[0] == 'start':
 
 class WrapperTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-wrapper-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-container-')
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.bin = self.base / 'bin'
@@ -176,7 +176,13 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.calls())
         self.assertFalse((self.base / 'home').exists())
-        for needle in ('OPENCODE_CONTAINER_PROVIDER', 'OPENCODE_CONTAINER_ENV_VARS',
+        self.assertNotIn('deprecated;', result.stderr)
+        for needle in ('Container options:', 'Environment:', 'OPENCODE_CONTAINER_IMAGE',
+                       'OPENCODE_CONTAINER_VERSION', 'OPENCODE_CONTAINER_PODMAN ',
+                       'OPENCODE_CONTAINER_PODMAN_SOCKET', 'OPENCODE_CONTAINER_YOLO',
+                       '1/true/yes enable; empty/0/false/no disable',
+                       'including configured ask/deny rules', 'default: 1.18.3',
+                       'OPENCODE_CONTAINER_PROVIDER', 'OPENCODE_CONTAINER_ENV_VARS',
                        'OPENCODE_CONTAINER_AGENTS_DIR', 'OPENCODE_CONTAINER_SYSTEM_CONFIG',
                        'anthropic, openai, google, openrouter', 'amazon-bedrock',
                        'azure, opencode or none', '~/.claude is never mounted'):
@@ -506,6 +512,109 @@ class WrapperTests(unittest.TestCase):
             expected=home or '/home/'+subprocess.check_output(['id','-un'],text=True).strip()
             self.assertEqual(result.stdout,expected+'|'+subprocess.check_output(['id','-un'],text=True).strip()+'|payload')
 
+    def test_deprecated_shim(self):
+        shim = ROOT / 'opencode-wrapper'
+        link = self.base / 'opencode-link'
+        link.symlink_to(shim)
+        for entry in (shim, link):
+            with self.subTest(entry=entry.name):
+                self.log.unlink(missing_ok=True)
+                result = subprocess.run([str(entry), 'run', 'hello world', '', '--help'],
+                                        cwd=self.project, env=self.env, input='input payload',
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr.count('opencode-wrapper: deprecated; use opencode-container.sh'), 1)
+                self.assertEqual(self.create()[-4:], ['run', 'hello world', '', '--help'])
+                self.assertIn('stdin:input payload', result.stdout)
+        self.log.unlink()
+        result = subprocess.run([str(shim)], cwd=self.project, env=self.env | {'FAKE_EXIT': '125'},
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 125, result.stderr)
+
+    def test_labels_use_common_namespace(self):
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = self.create()
+        labels = sorted(create[i+1].split('=', 1)[0] for i, v in enumerate(create) if v == '--label')
+        self.assertEqual(labels, ['io.opencode-container.instance', 'io.opencode-container.managed',
+                                  'io.opencode-container.session', 'io.opencode-container.workspace',
+                                  'io.opencode-container.workspace-name'])
+        self.assertFalse(any(arg.startswith('io.opencode.') for arg in create))
+
+    def test_version_and_image_controls(self):
+        user = '-'.join([subprocess.check_output(['id', '-un'], text=True).strip(),
+                         str(os.getuid()), str(os.getgid())])
+        cases = (({}, '1.18.3', False),
+                 ({'OPENCODE_CONTAINER_VERSION': '1.19.0'}, '1.19.0', False),
+                 ({'OPENCODE_VERSION': '1.17.1'}, '1.17.1', True),
+                 ({'OPENCODE_VERSION': '1.17.1', 'OPENCODE_CONTAINER_VERSION': '1.19.0'}, '1.19.0', False))
+        for env, version, warned in cases:
+            with self.subTest(env=env):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(FAKE_IMAGE_STATUS='1', **env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.create()[-1], f'localhost/opencode-sandbox:{version}-{user}')
+                build = next(c for c in self.calls() if c[0] == 'build')
+                self.assertIn(f'OPENCODE_VERSION={version}', build)
+                self.assertEqual('OPENCODE_VERSION is deprecated' in result.stderr, warned)
+        self.log.unlink()
+        custom = 'localhost/opencode-custom:test'
+        result = self.run_wrapper(FAKE_IMAGE_STATUS='1', OPENCODE_CONTAINER_IMAGE=custom)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['image', 'exists', custom], self.calls())
+        self.assertEqual(next(c for c in self.calls() if c[0] == 'build')[2], custom)
+        self.assertEqual(self.create()[-1], custom)
+        for env in ({'OPENCODE_CONTAINER_VERSION': ''}, {'OPENCODE_CONTAINER_VERSION': 'a/b'},
+                    {'OPENCODE_CONTAINER_VERSION': '1:2'}, {'OPENCODE_VERSION': '1 2'},
+                    {'OPENCODE_CONTAINER_IMAGE': 'bad image'}, {'OPENCODE_CONTAINER_IMAGE': 'bad\timage'}):
+            with self.subTest(invalid=env):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**env)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(next(iter(env)), result.stderr)
+                self.assertFalse(self.calls())
+        recipe = (ROOT / 'Containerfile').read_text()
+        self.assertIn('ARG OPENCODE_VERSION=1.18.3\n', recipe)
+        self.assertIn('readonly DEFAULT_OPENCODE_VERSION=1.18.3\n', WRAPPER.read_text())
+
+    def test_yolo_switch(self):
+        allow = 'OPENCODE_PERMISSION={"*":"allow"}'
+        self.run_wrapper()
+        baseline = self.create()
+        for value in ('1', 'true', 'TRUE', 'Yes'):
+            with self.subTest(value=value):
+                self.log.unlink()
+                result = self.run_wrapper(OPENCODE_CONTAINER_YOLO=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                create = self.create()
+                self.assertEqual(create.count(allow), 1)
+                env_positions = [i for i, v in enumerate(create) if v == '--env']
+                self.assertGreater(create.index(allow), max(i for i in env_positions if '=' not in create[i+1]))
+                def surface(args):
+                    pairs = [(v, args[i+1]) for i, v in enumerate(args[:-1])
+                             if v in ('--volume', '--env', '--unsetenv', '--cap-drop=all', '--userns=keep-id')]
+                    return [p for p in pairs if p[1] != allow] + [a for a in args if a.startswith('--security-opt') or a.startswith('--pids')]
+                self.assertEqual(surface(create), surface(baseline))
+        for value in ('', '0', 'false', 'NO'):
+            with self.subTest(value=value):
+                self.log.unlink()
+                result = self.run_wrapper(OPENCODE_CONTAINER_YOLO=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(any('OPENCODE_PERMISSION' in a for a in self.create()))
+        self.log.unlink()
+        result = self.run_wrapper(OPENCODE_CONTAINER_YOLO='maybe')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('OPENCODE_CONTAINER_YOLO', result.stderr)
+        self.assertFalse(self.calls())
+        result = self.run_wrapper(OPENCODE_CONTAINER_YOLO='1', OPENCODE_PERMISSION='{"edit":"ask"}')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('OPENCODE_PERMISSION', result.stderr)
+        self.assertFalse(self.calls())
+        result = self.run_wrapper(OPENCODE_PERMISSION='{"edit":"ask"}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('OPENCODE_PERMISSION', self.create())
+        self.assertNotIn(allow, self.create())
+
     def test_image_inspection_and_build(self):
         for status in ('0','1','125'):
             self.log.unlink(missing_ok=True)
@@ -518,6 +627,7 @@ class WrapperTests(unittest.TestCase):
         build=next(c for c in self.calls() if c[0]=='build')
         self.assertEqual(build[-1],str(ROOT))
         self.assertIn('OPENCODE_VERSION=1.18.3',build)
+        self.assertEqual(build[build.index('--file')+1],str(ROOT/'Containerfile'))
         for field,cmd in (('USER_NAME',['id','-un']),('USER_ID',['id','-u']),('GROUP_ID',['id','-g'])):
             self.assertIn(field+'='+subprocess.check_output(cmd,text=True).strip(),build)
         self.assertTrue(self.create()[-1].startswith('localhost/opencode-sandbox:1.18.3-'))

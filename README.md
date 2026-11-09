@@ -1,9 +1,14 @@
-# OpenCode Sandbox
+# OpenCode CLI in Podman
 
-Wrapper for running OpenCode in a rootless Podman container while preserving
-the workspace and configuration between sessions.
+`opencode-container.sh` runs OpenCode in a rootless Podman container while
+preserving the workspace and OpenCode configuration between sessions. The
+image filesystem is read-only, with a writable workspace, private OpenCode XDG
+state and explicit temporary storage. Set `OPENCODE_CONTAINER_PODMAN=1` to
+expose the host Podman socket for container work inside the session.
 
-## Prerequisites
+## Enable rootless Podman on the host
+
+Requirements:
 
 - Linux or WSL2
 - Rootless Podman and GNU coreutils `timeout`
@@ -18,65 +23,18 @@ podman info --format '{{.Host.Security.Rootless}} {{.Host.OS}} {{.Host.ServiceIs
 The command must return `true linux false` for local Podman, or `true linux true`
 when using an explicit same-host Unix service endpoint.
 
-## Installation
-
-Make the wrapper executable:
-
-```bash
-chmod 0755 /mnt/d/Workspace/opencode-container/opencode-wrapper
-```
-
-Add the alias to your shell configuration:
-
-```bash
-alias opencode='/mnt/d/Workspace/opencode-container/opencode-wrapper'
-```
-
-Reload the shell configuration or open a new session.
-
-## Usage
-
-The wrapper preserves the normal OpenCode interface:
-
-```bash
-cd /home/yari/Workspace/project
-opencode
-opencode --version
-opencode run "Describe this project"
-```
-
-The first invocation builds the image. The default version is `1.18.3`; it can
-be overridden for one session:
-
-```bash
-OPENCODE_VERSION=1.18.3 opencode --version
-```
-
-## Container Names
-
-The name is derived from the workspace basename:
-
-```text
-/home/yari/Workspace/project -> project-0
-```
-
-Later instances use the highest existing index plus one. Intermediate indices
-are not reused while a higher index exists.
-
-Containers are ephemeral and are removed when the session ends.
-
-## Explicit Podman Delegation
-
-Session service access is disabled by default. Only exact
-`OPENCODE_CONTAINER_PODMAN=1` enables it; every other value disables access.
-Disabled sessions omit the socket and explicitly unset `CONTAINER_HOST`, even
-if the image defines it. A Unix launch connection remains independent.
-
 Launch requires a complete Linux rootless engine response and a boolean
 `Host.ServiceIsRemote`. Local Podman and explicit same-host absolute Unix
 `CONTAINER_HOST` paths beyond slashes are supported. Named connections,
 implicit remote contexts, TCP and SSH are rejected. Workspace/state sources
 must exist at the same absolute paths on the service host.
+
+## Optional host Podman API access
+
+Session service access is disabled by default. Only exact
+`OPENCODE_CONTAINER_PODMAN=1` enables it; every other value disables access.
+Disabled sessions omit the socket and explicitly unset `CONTAINER_HOST`, even
+if the image defines it. A Unix launch connection remains independent.
 
 Enabled delegation selects the first nonempty value among
 `OPENCODE_CONTAINER_PODMAN_SOCKET`, the Unix launch endpoint, and
@@ -105,7 +63,154 @@ socket access for the invoking user and an appropriate SELinux policy on the
 host, then retry explicitly. Delegation grants the service user's Podman
 authority, including launching containers with host mounts beyond the workspace.
 
-## State and Mounted Paths
+## Usage
+
+Make the wrapper executable and add an alias to your shell configuration:
+
+```bash
+chmod 0755 /mnt/d/Workspace/opencode-container/opencode-container.sh
+alias opencode='/mnt/d/Workspace/opencode-container/opencode-container.sh'
+```
+
+Reload the shell configuration or open a new session. `opencode-wrapper` remains
+as a deprecated alias: it prints one warning and runs `opencode-container.sh`
+with the same arguments, so existing aliases keep working. Point them to
+`opencode-container.sh` to remove the warning.
+
+The wrapper preserves the normal OpenCode interface:
+
+```bash
+cd /home/yari/Workspace/project
+opencode
+opencode --version
+opencode run "Describe this project"
+```
+
+The first invocation builds the image. Wrapper options:
+
+| Option | Effect |
+| --- | --- |
+| `--container-build` | refresh the versioned per-user image, then start the selected session |
+| `--container-shell` | bypass the OpenCode entrypoint and open `/bin/bash`, omitting all OpenCode arguments |
+| `--container-git-worktree` | expose the physical current directory's entire immediate parent read/write, retaining the original physical working directory and naming basename |
+| `--container-help` | wrapper help without engine or state side effects |
+
+Normal `--help` remains an OpenCode argument. Other OpenCode arguments keep
+their order and boundaries. The host must provide GNU coreutils `timeout` for
+bounded session cleanup.
+
+### Image and version
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `OPENCODE_CONTAINER_IMAGE` | `localhost/opencode-sandbox:<version>-<user>-<uid>-<gid>` | image inspected, built and run |
+| `OPENCODE_CONTAINER_VERSION` | `1.18.3` | OpenCode version built into the default tag |
+
+The version must match `[A-Za-z0-9][A-Za-z0-9._-]*`. The deprecated
+`OPENCODE_VERSION` is still read, with a warning, when
+`OPENCODE_CONTAINER_VERSION` is unset:
+
+```bash
+OPENCODE_CONTAINER_VERSION=1.18.3 opencode --version
+```
+
+### YOLO mode
+
+`OPENCODE_CONTAINER_YOLO` auto-approves every OpenCode permission request.
+`1`, `true` and `yes` enable it; unset, empty, `0`, `false` and `no` disable it;
+words are case-insensitive and other values stop before engine queries. When
+enabled, the session receives `OPENCODE_PERMISSION={"*":"allow"}`, which the
+pinned OpenCode merges after its configuration files. It therefore overrides
+configured `ask` and `deny` rules, like the native bypass flags of the other
+wrappers. Setting a host `OPENCODE_PERMISSION` together with YOLO is refused.
+YOLO does not change mounts, environment forwarding, delegation or hardening.
+When disabled, configured OpenCode permissions apply unchanged.
+
+OpenCode's own `--auto` flag is not used: OpenCode 1.18.3 accepts it only on the
+default interface and `run`, and rejects it before other subcommands.
+
+### Container names
+
+The name is derived from the workspace basename:
+
+```text
+/home/yari/Workspace/project -> project-0
+```
+
+Later instances use the highest existing index plus one. Intermediate indices
+are not reused while a higher index exists. Containers are ephemeral and are
+removed when the session ends.
+
+### Environment and provider credentials
+
+Environment forwarding passes nonempty inherited values by name
+(`--env VARIABLE`), so credentials are absent from generated Podman arguments.
+Values remain visible to container processes and engine inspection. HOME/USER/XDG,
+the YOLO permission and the enabled delegation endpoint are deliberate nonsecret
+assignments; `--env-host` is never used. Three sources are forwarded:
+
+1. The base allowlist: `TERM`, `COLORTERM`, `LANG`, `LC_ALL`, the proxy
+   variables, and the OpenCode configuration variables (`OPENCODE_CONFIG`,
+   `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`,
+   `OPENCODE_SERVER_PASSWORD`, `OPENCODE_SERVER_USERNAME` and the
+   `OPENCODE_DISABLE_*` controls).
+2. The provider selected with `OPENCODE_CONTAINER_PROVIDER`. Values are
+   OpenCode provider IDs; the variable sets come from the provider metadata of
+   the pinned OpenCode 1.18.3:
+
+   | Value | Variables |
+   | --- | --- |
+   | `anthropic` | `ANTHROPIC_API_KEY` |
+   | `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
+   | `google` | `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY` |
+   | `openrouter` | `OPENROUTER_API_KEY` |
+   | `amazon-bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK` |
+   | `azure` | `AZURE_RESOURCE_NAME`, `AZURE_API_KEY` |
+   | `opencode` | `OPENCODE_API_KEY` (OpenCode Zen) |
+   | `none` | none |
+
+   Unset means `none`. Any other value, including empty, stops before engine
+   queries. Credentials stored with `opencode auth login` live in the mounted
+   OpenCode data directory and work without this variable. Google Vertex is not
+   supported: its credentials file is not mounted.
+3. `OPENCODE_CONTAINER_ENV_VARS`: a space-separated list of extra variable
+   names, for example `OPENCODE_CONTAINER_ENV_VARS="GH_TOKEN DATABASE_URL"`.
+   Invalid names stop before engine queries. `HOME`, `USER`, the XDG bases,
+   `CONTAINER_HOST` and `CONTAINER_CONNECTION` are skipped with a warning.
+
+`GH_TOKEN` and `GITHUB_TOKEN` are never forwarded by default.
+
+### Migrating from earlier releases
+
+Earlier releases used `opencode-wrapper`, `OPENCODE_VERSION`, `Dockerfile`
+and `io.opencode.*` labels. They also mounted `~/.claude`, `~/.agents` and
+`/etc/opencode` whenever they existed, and forwarded every set Anthropic,
+OpenAI, Google/Gemini, OpenRouter, AWS, Azure and GitHub variable.
+
+- Point aliases to `opencode-container.sh`; `opencode-wrapper` warns.
+- Replace `OPENCODE_VERSION` with `OPENCODE_CONTAINER_VERSION`.
+- Session containers are now labeled `io.opencode-container.*`. Inspect current
+  sessions with `podman ps --all --filter label=io.opencode-container.managed=true`
+  and containers left by earlier releases with
+  `podman ps --all --filter label=io.opencode.managed=true`. The wrapper never
+  removes or adopts the older containers; their names stay reserved.
+- Set `OPENCODE_CONTAINER_PROVIDER` for the provider you use, or authenticate
+  once with `opencode auth login` inside the container.
+- While `OPENCODE_CONTAINER_PROVIDER` is unset, the wrapper prints one notice
+  naming formerly forwarded variables that are set but no longer forwarded
+  (names only). `OPENCODE_CONTAINER_PROVIDER=none` silences it.
+- Azure users: OpenCode's `azure` provider reads `AZURE_RESOURCE_NAME` and
+  `AZURE_API_KEY`, not the previously forwarded `AZURE_OPENAI_*` names.
+- List GitHub tokens or extra provider keys in `OPENCODE_CONTAINER_ENV_VARS`.
+- OpenCode no longer sees `~/.claude/CLAUDE.md` or `~/.claude/skills`. Move
+  skills to `~/.agents/skills` with `OPENCODE_CONTAINER_AGENTS_DIR=1`, or move
+  instructions and skills into the OpenCode configuration directory.
+- Set `OPENCODE_CONTAINER_AGENTS_DIR=1` or `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`
+  to keep the other integrations.
+
+Existing per-user images keep their tags; no rebuild is required.
+
+## Mounts and security
 
 The physical workspace and four OpenCode XDG directories are host-writable:
 `$XDG_CONFIG_HOME/opencode`, `$XDG_DATA_HOME/opencode`,
@@ -142,67 +247,6 @@ mounted.
 Quoted bind arguments support spaces and commas. Colon/CR/LF bind paths are
 rejected before image operations rather than misinterpreted.
 
-### Environment and provider credentials
-
-Environment forwarding passes nonempty inherited values by name
-(`--env VARIABLE`), so credentials are absent from generated Podman arguments.
-Values remain visible to container processes and engine inspection. HOME/USER/XDG
-and the enabled delegation endpoint are deliberate nonsecret assignments;
-`--env-host` is never used. Three sources are forwarded:
-
-1. The base allowlist: `TERM`, `COLORTERM`, `LANG`, `LC_ALL`, the proxy
-   variables, and the OpenCode configuration variables (`OPENCODE_CONFIG`,
-   `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`,
-   `OPENCODE_SERVER_PASSWORD`, `OPENCODE_SERVER_USERNAME` and the
-   `OPENCODE_DISABLE_*` controls).
-2. The provider selected with `OPENCODE_CONTAINER_PROVIDER`. Values are
-   OpenCode provider IDs; the variable sets come from the provider metadata of
-   the pinned OpenCode 1.18.3:
-
-   | Value | Variables |
-   | --- | --- |
-   | `anthropic` | `ANTHROPIC_API_KEY` |
-   | `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
-   | `google` | `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GEMINI_API_KEY` |
-   | `openrouter` | `OPENROUTER_API_KEY` |
-   | `amazon-bedrock` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_BEARER_TOKEN_BEDROCK` |
-   | `azure` | `AZURE_RESOURCE_NAME`, `AZURE_API_KEY` |
-   | `opencode` | `OPENCODE_API_KEY` (OpenCode Zen) |
-   | `none` | none |
-
-   Unset means `none`. Any other value, including empty, stops before engine
-   queries. Credentials stored with `opencode auth login` live in the mounted
-   OpenCode data directory and work without this variable. Google Vertex is not
-   supported: its credentials file is not mounted.
-3. `OPENCODE_CONTAINER_ENV_VARS`: a space-separated list of extra variable
-   names, for example `OPENCODE_CONTAINER_ENV_VARS="GH_TOKEN DATABASE_URL"`.
-   Invalid names stop before engine queries. `HOME`, `USER`, the XDG bases,
-   `CONTAINER_HOST` and `CONTAINER_CONNECTION` are skipped with a warning.
-
-`GH_TOKEN` and `GITHUB_TOKEN` are never forwarded by default.
-
-### Migrating from earlier releases
-
-Earlier releases mounted `~/.claude`, `~/.agents` and `/etc/opencode` whenever
-they existed, and forwarded every set Anthropic, OpenAI, Google/Gemini,
-OpenRouter, AWS, Azure and GitHub variable.
-
-- Set `OPENCODE_CONTAINER_PROVIDER` for the provider you use, or authenticate
-  once with `opencode auth login` inside the container.
-- While `OPENCODE_CONTAINER_PROVIDER` is unset, the wrapper prints one notice
-  naming formerly forwarded variables that are set but no longer forwarded
-  (names only). `OPENCODE_CONTAINER_PROVIDER=none` silences it.
-- Azure users: OpenCode's `azure` provider reads `AZURE_RESOURCE_NAME` and
-  `AZURE_API_KEY`, not the previously forwarded `AZURE_OPENAI_*` names.
-- List GitHub tokens or extra provider keys in `OPENCODE_CONTAINER_ENV_VARS`.
-- OpenCode no longer sees `~/.claude/CLAUDE.md` or `~/.claude/skills`. Move
-  skills to `~/.agents/skills` with `OPENCODE_CONTAINER_AGENTS_DIR=1`, or move
-  instructions and skills into the OpenCode configuration directory.
-- Set `OPENCODE_CONTAINER_AGENTS_DIR=1` or `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`
-  to keep the other integrations.
-
-## Security
-
 The main container runs with:
 
 - a read-only root filesystem;
@@ -220,52 +264,48 @@ The rootless Podman socket still gives OpenCode full control over the user's
 Podman engine. A process deliberately using the API can access host paths that
 the user can read. Leave session delegation disabled when it is unnecessary.
 
-## Updating
+## Included Tools
 
-The version is defined in `opencode-wrapper` through `OPENCODE_VERSION` and in
-the `Dockerfile` through `ARG OPENCODE_VERSION`.
+The image is built from `Containerfile` on the official
+`ghcr.io/anomalyco/opencode` image at the selected version, adding Bash,
+CA certificates, curl, Git, jq, the Podman remote client (as `podman`) and
+ripgrep. The image creates the host user's username and numeric UID/GID.
+
+Default tags contain the OpenCode version, username, UID and GID. Only
+image-exists status 1 triggers an automatic build; other engine/storage errors
+stop startup. Explicit refresh still performs all preflights first. Builds use
+the wrapper's physical recipe directory.
+
+The sole `.containerignore` defaults to denying all inputs and allows only root
+`Containerfile`, `opencode-entrypoint`, and `.containerignore`. Update this
+allowlist deliberately for any future local COPY input; nested lookalikes,
+credentials, state and unrelated files must remain excluded.
+
+### Updating
+
+The version is defined in `opencode-container.sh` (`DEFAULT_OPENCODE_VERSION`)
+and in `Containerfile` (`ARG OPENCODE_VERSION`); a unit test keeps them equal.
 
 To update:
 
 1. Change both version values.
-2. Remove or rebuild the previous image tag.
-3. Verify `opencode --version`.
+2. Re-read the provider metadata of the new version and update the provider
+   table if needed.
+3. Remove or rebuild the previous image tag.
+4. Verify `opencode --version`.
 
 Do not run `opencode upgrade` inside the container: the main filesystem is
 immutable.
 
-## Wrapper Modes
-
-The host must provide GNU coreutils `timeout` for bounded session cleanup.
-Use `--container-help` for wrapper help without engine or state side effects;
-normal `--help` remains an OpenCode argument. `--container-build` refreshes the
-versioned per-user image and then starts the selected session.
-`--container-shell` bypasses the OpenCode entrypoint and opens `/bin/bash`,
-omitting all OpenCode arguments. `--container-git-worktree` explicitly exposes
-the physical current directory's entire immediate parent read/write while
-retaining the original physical working directory and naming basename.
-Other OpenCode arguments keep their order and boundaries.
-
-## Image Inspection and Build Context
-
-Keep the default OpenCode version `1.18.3` and tags containing version,
-username, UID and GID. Only image-exists status 1 triggers an automatic build;
-other engine/storage errors stop startup. Explicit refresh still performs all
-preflights first. Builds use the wrapper's physical recipe directory.
-The sole `.dockerignore` defaults to denying all inputs and allows only root
-`Dockerfile`, `opencode-entrypoint`, and `.dockerignore`. Update this allowlist
-deliberately for any future local COPY input; nested lookalikes, credentials,
-state and unrelated files must remain excluded.
-
-## Session Lifecycle
+## Session lifecycle
 
 Names use the original physical workspace basename, sanitized, followed by an
 index above the highest running/stopped suffix. Parse at most nine digits in
 base ten (including `08`); ignore malformed/oversized suffixes. Reserve atomically
 with create and retry at most 20 confirmed collisions. Checked enumeration and
 collision errors stop startup. Never replace or remove another session to obtain
-a name. Private creation records and `io.opencode.session` identify owned full
-container IDs; stderr warnings must not become part of an ID.
+a name. Private creation records and `io.opencode-container.session` identify
+owned full container IDs; stderr warnings must not become part of an ID.
 
 Stdin remains interactive for pipes/files as well as terminals; allocate a TTY
 only with terminal stdin and stdout. Preserve input/EOF for the attached client.
@@ -279,14 +319,15 @@ signals do not renew the deadline. Only verified owned IDs authorize removal.
 Unresolved creation or removal is reported with an ID/session marker for manual
 engine inspection. Client cancellation does not prove engine request cancellation;
 engine loss or SIGKILL can leave residual resources. Use `podman ps --all --filter
-label=io.opencode.managed=true` and the reported session label to inspect them;
-never indiscriminately remove other managed sessions.
+label=io.opencode-container.managed=true` and the reported session label to
+inspect them; never indiscriminately remove other managed sessions.
 
 ## Verification
 
 Run static checks first, then the synthetic suite (Python standard library only):
 
 ```bash
+bash -n opencode-container.sh
 bash -n opencode-wrapper
 bash -n opencode-entrypoint
 python3 -m unittest discover -s tests -p test_wrapper.py -v
@@ -317,12 +358,14 @@ podman build \
 
 The real suite exercises mount flags/capacities/lifetime, identity, state,
 context filtering, concurrency, signals, stdin, worktrees, delegation and
-remapping, version output, and actual OpenTUI startup/quit through a PTY.
+remapping, version output, the YOLO permission, labels, the deprecated alias,
+and actual OpenTUI startup/quit through a PTY.
 The renderer uses a disposable home with no provider credentials. Its ignored
 `.test-state/renderer-last.txt` transcript is available for local inspection.
 Synthetic and runtime results are recorded separately in
-[the acceptance report](docs/validation.md). Version output alone does
+[the validation record](docs/validation.md). Version output alone does
 not initialize OpenTUI and cannot establish renderer compatibility.
 
 Inspect remaining containers with `podman ps --all --filter
-label=io.opencode.managed=true`; other users' active sessions must remain intact.
+label=io.opencode-container.managed=true`; other users' active sessions must
+remain intact.

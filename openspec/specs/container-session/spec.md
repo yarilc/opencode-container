@@ -1,4 +1,4 @@
-# session-lifecycle Specification
+# container-session Specification
 
 ## Purpose
 

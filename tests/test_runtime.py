@@ -250,15 +250,30 @@ class RuntimeTests(unittest.TestCase):
     def test_mounts_state_identity_and_entrypoint(self):
         for name in ('.claude','.agents'):
             path=self.home/name; path.mkdir(); (path/'sentinel').write_text('readonly')
+        # ~/.claude is never mounted and ~/.agents only on exact opt-in.
         self.assert_success(self.shell('''
-for path in "$HOME/.claude" "$HOME/.agents"; do
-    test "$(cat "$path/sentinel")" = readonly
-    if touch "$path/write-probe" 2>/dev/null; then exit 20; fi
-done
-# By-name forwarding delivers only an explicitly allowed synthetic credential.
+test ! -e "$HOME/.claude"
+test ! -e "$HOME/.agents"
+'''))
+        self.assert_success(self.shell('''
+test ! -e "$HOME/.claude"
+test "$(cat "$HOME/.agents/sentinel")" = readonly
+if touch "$HOME/.agents/write-probe" 2>/dev/null; then exit 20; fi
+''',OPENCODE_CONTAINER_AGENTS_DIR='1'))
+        # By-name forwarding delivers only the selected provider and listed names.
+        self.assert_success(self.shell('''
 test "$OPENAI_API_KEY" = synthetic-acceptance
+test "$DATABASE_URL" = synthetic-extra
+test -z "${ANTHROPIC_API_KEY+x}"
+test -z "${GH_TOKEN+x}"
 test -z "${UNLISTED_SECRET+x}"
-''',OPENAI_API_KEY='synthetic-acceptance',UNLISTED_SECRET='not-forwarded'))
+''',OPENCODE_CONTAINER_PROVIDER='openai',OPENCODE_CONTAINER_ENV_VARS='DATABASE_URL',
+            OPENAI_API_KEY='synthetic-acceptance',ANTHROPIC_API_KEY='synthetic-other',
+            GH_TOKEN='synthetic-github',DATABASE_URL='synthetic-extra',UNLISTED_SECRET='not-forwarded'))
+        result=self.shell('test -z "${OPENAI_API_KEY+x}"',OPENAI_API_KEY='synthetic-acceptance')
+        self.assert_success(result)
+        self.assertIn('not forwarding OPENAI_API_KEY',result.stderr)
+        self.assertNotIn('synthetic-acceptance',result.stderr)
         shutil.copyfile(ROOT/'tests/image-smoke.sh',self.project/'image-smoke.sh')
         result=self.shell('bash -x ./image-smoke.sh')
         self.assert_success(result)

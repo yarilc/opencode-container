@@ -135,3 +135,72 @@ The OpenSpec capabilities were renamed to the scheme shared by the five wrappers
 The evidence file was renamed from `docs/sandbox-acceptance.md` to `docs/validation.md`, the common name across the five wrappers; its earlier content is unchanged.
 
 `openspec validate --specs` passed: 4 specs, 0 failures.
+
+## Narrowed exposed state (A06, A07): 2026-11-09
+
+Change `narrow-exposed-state` (Wave 2). Host: rootless Podman 4.9.3 server.
+Images: session image `localhost/opencode-sandbox:1.18.3-node-1000-1000`
+(`36a4ca917807`, unchanged by this change), runner `localhost/claude-code:latest`
+(`7cd81e8ccd06`). No credentials, provider login or model requests were used;
+every credential value was synthetic.
+
+Behavior changes:
+
+- `~/.claude` is never mounted. `~/.agents` and `/etc/opencode` are mounted
+  read-only only with exact `OPENCODE_CONTAINER_AGENTS_DIR=1` and
+  `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`. An opt-in for a missing directory
+  stops before engine queries.
+- Provider variables are forwarded only for `OPENCODE_CONTAINER_PROVIDER`.
+  GitHub tokens and other providers' keys are no longer forwarded by default.
+  Extra names come from `OPENCODE_CONTAINER_ENV_VARS`. When no provider is
+  selected, a one-line notice names formerly forwarded variables that are set,
+  without their values.
+
+Provider metadata source: the `env:[...]` provider entries embedded in
+`/usr/local/bin/opencode` of `ghcr.io/anomalyco/opencode:1.18.3`, read on
+2026-11-09 with the network disabled. `AWS_SESSION_TOKEN` and `OPENAI_BASE_URL`
+are read by the same binary and were already forwarded, so they remain in their
+profiles. OpenCode's `azure` provider reads `AZURE_RESOURCE_NAME` and
+`AZURE_API_KEY`; the previously forwarded `AZURE_OPENAI_*` names are covered only
+by the migration notice. Google Vertex needs a host credentials file that is not
+mounted and is unsupported.
+
+| Check | Result |
+| --- | --- |
+| Baseline wrapper suite before the change | 19 tests, OK |
+| `tests/test_wrapper.py` after the change (runner container) | 26 tests, OK |
+| Full unit discovery (`test_*.py`; runtime tests skipped without opt-in) | 37 tests, OK (11 skipped) |
+| `bash tests/run-runtime.sh` (real rootless engine) | 11 tests, OK; OpenTUI welcome prompt observed |
+| `bash -n`, ShellCheck (`koalaman/shellcheck:stable`), `git diff --check` | Passed |
+| Test-owned managed containers after the runs | None |
+
+New wrapper cases:
+- `~/.claude` containing `.credentials.json` is never in the create arguments;
+- integrations require exact `1`, and a missing opted-in directory fails with no
+  engine call or state;
+- the matrix over all eight provider values;
+- unsupported values (empty, `Anthropic`, `vertex`, a list, `google-vertex`);
+- the notice: present, single, value-free, suppressed by `none` or a provider,
+  and excluding listed names;
+- extra names with deduplication, invalid tokens and reserved names that leave
+  `CONTAINER_HOST` unset;
+- help listing the controls.
+
+The real-engine check confirmed:
+- `$HOME/.claude` and `$HOME/.agents` are absent by default, and `.agents` is
+  read-only with the opt-in;
+- with `openai` only the synthetic `OPENAI_API_KEY` and the listed
+  `DATABASE_URL` arrive, while `ANTHROPIC_API_KEY`, `GH_TOKEN` and an unlisted
+  variable do not;
+- with no provider the notice names `OPENAI_API_KEY` without its value.
+
+Initial failures and reruns (all in the tests, not the wrapper):
+- the new assertions expected only `LANG` among base names, but the runner
+  environment also supplies `TERM`, which is in the unchanged base allowlist,
+  so the helper now ignores both;
+- refusal subtests reused the log and home of an earlier successful run and
+  now use fresh ones.
+
+Unit suites run in a runner container with an executable tmpfs `/tmp`, because
+the agent sandbox mounts `/tmp` `noexec` and cannot bind Unix sockets on its
+workspace filesystem.

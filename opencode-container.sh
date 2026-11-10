@@ -7,7 +7,10 @@ usage() {
 Usage: opencode-container.sh [container options] [OpenCode arguments...]
 
 Container options:
+  --container-qualify    verify a prepared restricted installation with fixed
+                         local controls; must be used alone
   --container-build      build or refresh the container image before starting
+                         (requires OPENCODE_CONTAINER_MAINTENANCE=1)
   --container-shell      open Bash instead of starting OpenCode (OpenCode
                          arguments are omitted)
   --container-git-worktree mount the parent of the current physical directory
@@ -21,13 +24,34 @@ application grace. Only this invocation's verified container is removed;
 SIGKILL or engine loss can leave residual containers requiring inspection.
 
 Environment:
+  OPENCODE_CONTAINER_NETWORK  offline, provider, or unrestricted; required for
+                         every launch (unrestricted is the previous behavior)
+  OPENCODE_CONTAINER_NETWORK_PROFILE protected provider policy profile name
+                         (anthropic-api, openai-api, openrouter-api or opencode-zen)
+  OPENCODE_CONTAINER_NETWORK_POLICY absolute operator policy JSON path
+  OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR private native directory at its host path
+  OPENCODE_CONTAINER_EGRESS_IMAGE immutable proxy image ID or registry digest
+  OPENCODE_CONTAINER_MAINTENANCE authorize image builds and proxy pulls only with
+                         exact value 1, including the build of a missing image
   OPENCODE_CONTAINER_IMAGE    image name (default: localhost/opencode-cli:latest);
                          OpenCode and OpenSpec versions are pinned in Containerfile
   OPENCODE_CONTAINER_STATE_DIR private host directory used as the persistent
-                         /opencode-home (default: unset; the host OpenCode XDG
-                         directories are mounted below an ephemeral home)
+                         /opencode-home (default: unset or empty; the shared OpenCode
+                         directories ~/.config/opencode, ~/.local/share/opencode,
+                         ~/.cache/opencode and ~/.local/state/opencode are
+                         mounted below an ephemeral home; host XDG_*_HOME
+                         variables do not relocate them)
+  OPENCODE_CONTAINER_CONFIG_DIR private host directory replacing only the shared
+                         configuration directory; conflicts with
+                         OPENCODE_CONTAINER_STATE_DIR
+  OPENCODE_CONTAINER_TRUST_HOST_CA trust a host CA bundle: 1, true, or yes
+                         (default: disabled)
+  OPENCODE_CONTAINER_CA_BUNDLE CA bundle file to trust (default: first of
+                         /etc/ssl/certs/ca-certificates.crt and
+                         /etc/pki/tls/certs/ca-bundle.crt)
   OPENCODE_CONTAINER_PODMAN   expose the host Podman socket only when exactly 1
-                         (default: disabled; other values also disable access)
+                         (default: disabled; other values also disable access);
+                         rejected in offline and provider modes
   OPENCODE_CONTAINER_PODMAN_SOCKET absolute socket override for enabled access
                          (then Unix CONTAINER_HOST, then XDG_RUNTIME_DIR or
                          /run/user/<uid>, with /podman/podman.sock appended)
@@ -39,7 +63,10 @@ Environment:
                          anthropic, openai, google, openrouter,
                          amazon-bedrock, azure, opencode or none
                          (default: none; stored `opencode auth login`
-                         credentials work without it)
+                         credentials work without it); in provider mode the
+                         network profile selects the only forwarded key and
+                         this value must be unset, none or the matching provider;
+                         offline mode forwards no provider variable
   OPENCODE_CONTAINER_ENV_VARS space-separated extra variable names to forward
                          by name, e.g. "GH_TOKEN" (default: none)
   OPENCODE_CONTAINER_AGENTS_DIR exactly 1 mounts ~/.agents read-only
@@ -71,16 +98,69 @@ drive root; descendants such as /mnt/d/project are allowed.
 Worktree mode exposes the entire parent beyond the workspace.
 Linux rootless Podman and host GNU coreutils timeout are required.
 opencode-wrapper is a deprecated alias of this script.
+
+Migration: every launch now needs an explicit OPENCODE_CONTAINER_NETWORK. Set
+OPENCODE_CONTAINER_NETWORK=unrestricted to keep the previous networking
+behavior, and add OPENCODE_CONTAINER_MAINTENANCE=1 to commands that build the
+image, e.g.:
+  OPENCODE_CONTAINER_NETWORK=unrestricted OPENCODE_CONTAINER_MAINTENANCE=1 bash ./opencode-container.sh --container-build
+Shared state now uses the fixed paths above; move OpenCode directories kept
+under a custom XDG_*_HOME, or use OPENCODE_CONTAINER_CONFIG_DIR or
+OPENCODE_CONTAINER_STATE_DIR. Offline sessions cannot reach any model provider.
+Restricted failures never retry unrestricted networking.
+
+Restricted modes (offline, provider) require host Python 3, a same-host Unix
+rootless Netavark service with Podman >= 4.9, standard OCI seccomp, usable
+Landlock ABI >= 3, a protected installation outside writable workspace/state
+trees, a static guard and SHA-256 manifest in network/bin, and a current local
+qualification report (run --container-qualify alone after preparation or
+relevant updates). Changed boot, engine/backend/security, code/images,
+policy/profile, CA trust or hardening invalidates the report; an unidentifiable
+active LSM policy requires the gate on each launch. Locally-qualified
+installations are distinguished from release-measured acceptance records.
+Restricted sessions do not receive host proxy or CA variables; the relay sets
+the proxy and NO_PROXY=localhost,127.0.0.1,::1 keeps the local OpenCode server
+reachable. Named Unix sockets, host services and LSP downloads are unavailable.
+Provider mode uses an external CONNECT proxy that binds the TLS server name
+(initial and retried ClientHello) to the CONNECT host before forwarding; it
+does not prove exclusive communication with your provider account. Allowed
+services can receive data: an injected agent can send workspace data to an
+allowed host (anthropic-api: api.anthropic.com; openai-api: api.openai.com;
+openrouter-api: openrouter.ai; opencode-zen: opencode.ai) with an attacker's
+key or account. Only offline removes this. Provider-hosted tools such as web
+search run at the provider, outside this boundary. Restricted sessions set
+OPENCODE_DISABLE_AUTOUPDATE, _DEFAULT_PLUGINS, _LSP_DOWNLOAD, _MODELS_FETCH and
+_SHARE to 1 after forwarding; writable configuration cannot re-enable them.
+Browser-callback logins are unsupported; use API keys. See network/README.md
+and docs/network-contract.md.
 EOF
 }
 
+die() { printf 'opencode-container: %s\n' "$*" >&2; exit 1; }
+
+# Help takes precedence regardless of option order and never needs Podman.
+for arg in "$@"; do
+    [[ "$arg" != --container-help ]] || { usage; exit 0; }
+done
+for arg in "$@"; do
+    if [[ "$arg" == --container-qualify ]]; then
+        [[ $# == 1 ]] || die '--container-qualify must be used alone'
+        command -v python3 >/dev/null || die 'host Python 3 is required for qualification'
+        qualify_dir=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
+        exec python3 -I "$qualify_dir/network/qualify.py" qualify
+    fi
+done
+
 build_image=0
+qualification_probe=0
 shell_mode=0
 git_worktree=0
 agent_args=()
 for arg in "$@"; do
     case "$arg" in
-        --container-help) usage; exit 0 ;;
+        --container-qualify-probe)
+            [[ $# == 1 ]] || die 'the fixed qualification probe must be used alone'
+            qualification_probe=1 ;;
         --container-build) build_image=1 ;;
         --container-shell) shell_mode=1 ;;
         --container-git-worktree) git_worktree=1 ;;
@@ -88,11 +168,43 @@ for arg in "$@"; do
     esac
 done
 
+# An explicit mode precedes every other check, engine query and state operation.
+# add-container-setup replaces this message with guided setup.
+[[ -n "${OPENCODE_CONTAINER_NETWORK:-}" ]] \
+    || die 'OPENCODE_CONTAINER_NETWORK is required: set offline, provider, or unrestricted (unrestricted keeps the previous networking behavior)'
+network_mode=$OPENCODE_CONTAINER_NETWORK
+case "$network_mode" in
+    offline|provider|unrestricted) ;;
+    *) die 'OPENCODE_CONTAINER_NETWORK must be offline, provider, or unrestricted' ;;
+esac
+restricted=0
+[[ "$network_mode" == unrestricted ]] || restricted=1
+if ((restricted)) && [[ "${OPENCODE_CONTAINER_PODMAN:-}" == 1 ]]; then
+    die 'restricted networking rejects OPENCODE_CONTAINER_PODMAN=1: the host API bypasses egress enforcement; select explicit unrestricted mode for delegation'
+fi
+if [[ "$network_mode" == provider ]]; then
+    [[ -n "${OPENCODE_CONTAINER_NETWORK_PROFILE:-}" && -n "${OPENCODE_CONTAINER_NETWORK_POLICY:-}" ]] \
+        || die 'provider mode requires OPENCODE_CONTAINER_NETWORK_PROFILE and OPENCODE_CONTAINER_NETWORK_POLICY'
+    [[ -n "${OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR:-}" && -n "${OPENCODE_CONTAINER_EGRESS_IMAGE:-}" ]] \
+        || die 'provider mode requires a private host-path OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR and immutable OPENCODE_CONTAINER_EGRESS_IMAGE'
+fi
+trust_host_ca=0
+case "${OPENCODE_CONTAINER_TRUST_HOST_CA:-}" in
+    [Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1) trust_host_ca=1 ;;
+    ''|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) ;;
+    *) die 'OPENCODE_CONTAINER_TRUST_HOST_CA must be 0, 1, true, false, yes, or no' ;;
+esac
+config_override=${OPENCODE_CONTAINER_CONFIG_DIR:-}
+if [[ -n "$config_override" ]]; then
+    [[ -z "${OPENCODE_CONTAINER_STATE_DIR:-}" ]] \
+        || die 'OPENCODE_CONTAINER_STATE_DIR conflicts with OPENCODE_CONTAINER_CONFIG_DIR; unset OPENCODE_CONTAINER_CONFIG_DIR to isolate state, or unset OPENCODE_CONTAINER_STATE_DIR to keep shared state'
+    [[ "$config_override" == /* && "$config_override" != *:* && "$config_override" != *$'\n'* && "$config_override" != *$'\r'* ]] \
+        || die "OPENCODE_CONTAINER_CONFIG_DIR must be an absolute path without colon, CR or LF: $config_override"
+fi
+
 SCRIPT_PATH=$(readlink -f -- "${BASH_SOURCE[0]}")
 SCRIPT_DIR=$(dirname -- "$SCRIPT_PATH")
 readonly SCRIPT_PATH SCRIPT_DIR
-
-die() { printf 'opencode-container: %s\n' "$*" >&2; exit 1; }
 
 # Wrapper settings are validated before any engine query or state creation.
 yolo=0
@@ -135,12 +247,38 @@ if [[ -n "${OPENCODE_CONTAINER_PROVIDER+x}" ]]; then
         *) die 'OPENCODE_CONTAINER_PROVIDER must be one of: anthropic, openai, google, openrouter, amazon-bedrock, azure, opencode, none' ;;
     esac
 fi
+# Restricted sessions forward no provider variable except the credential of the
+# selected network profile (mirrors the auth methods in agent/profile.json).
+if ((restricted)); then
+    profile_provider=''
+    profile_credential=''
+    if [[ "$network_mode" == provider ]]; then
+        case "$OPENCODE_CONTAINER_NETWORK_PROFILE" in
+            anthropic-api) profile_provider=anthropic profile_credential=ANTHROPIC_API_KEY ;;
+            openai-api) profile_provider=openai profile_credential=OPENAI_API_KEY ;;
+            openrouter-api) profile_provider=openrouter profile_credential=OPENROUTER_API_KEY ;;
+            opencode-zen) profile_provider=opencode profile_credential=OPENCODE_API_KEY ;;
+        esac
+        if ((provider_selected)) && [[ "$OPENCODE_CONTAINER_PROVIDER" != none \
+            && "$OPENCODE_CONTAINER_PROVIDER" != "$profile_provider" ]]; then
+            die "OPENCODE_CONTAINER_PROVIDER=$OPENCODE_CONTAINER_PROVIDER does not match OPENCODE_CONTAINER_NETWORK_PROFILE=$OPENCODE_CONTAINER_NETWORK_PROFILE; unset it or select the matching provider"
+        fi
+    fi
+    provider_names=()
+    [[ -z "$profile_credential" ]] || provider_names=("$profile_credential")
+fi
+# Restricted modes own the proxy, CA and optional-traffic settings.
+readonly PROXY_NAMES='HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy'
+readonly CA_NAMES='SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS'
+readonly PROTECTED_FLAGS='OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_DEFAULT_PLUGINS OPENCODE_DISABLE_LSP_DOWNLOAD OPENCODE_DISABLE_MODELS_FETCH OPENCODE_DISABLE_SHARE'
+reserved_names=$AUTHORITATIVE_NAMES
+((restricted == 0)) || reserved_names+="$PROXY_NAMES $CA_NAMES $PROTECTED_FLAGS "
 extra_names=()
 read -r -a requested_extra_names <<< "${OPENCODE_CONTAINER_ENV_VARS:-}"
 for variable_name in "${requested_extra_names[@]}"; do
     [[ "$variable_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
         || die "OPENCODE_CONTAINER_ENV_VARS contains an invalid variable name: $variable_name"
-    if [[ "$AUTHORITATIVE_NAMES" == *" $variable_name "* ]]; then
+    if [[ "$reserved_names" == *" $variable_name "* ]]; then
         printf 'opencode-container: OPENCODE_CONTAINER_ENV_VARS: skipping %s, which the wrapper sets itself\n' "$variable_name" >&2
         continue
     fi
@@ -159,7 +297,7 @@ opt_in_integration() {
 }
 opt_in_integration OPENCODE_CONTAINER_AGENTS_DIR "${HOME:-}/.agents" /opencode-home/.agents
 opt_in_integration OPENCODE_CONTAINER_SYSTEM_CONFIG /etc/opencode /etc/opencode
-if ((provider_selected == 0)); then
+if ((provider_selected == 0 && restricted == 0)); then
     unforwarded=()
     for variable_name in $ALL_PROFILE_NAMES AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT GH_TOKEN GITHUB_TOKEN; do
         [[ -n "${!variable_name:-}" ]] || continue
@@ -251,7 +389,8 @@ check_private_dir() {
     printf '%s' "$resolved"
 }
 state_home=''
-if [[ -n "${OPENCODE_CONTAINER_STATE_DIR+x}" ]]; then
+# An empty value selects shared state, like an unset one (as in the other wrappers).
+if [[ -n "${OPENCODE_CONTAINER_STATE_DIR:-}" ]]; then
     state_request=$OPENCODE_CONTAINER_STATE_DIR
     [[ "$state_request" == /* && "$state_request" != *:* && "$state_request" != *$'\n'* && "$state_request" != *$'\r'* ]] \
         || die "OPENCODE_CONTAINER_STATE_DIR must be an absolute path without colon, CR or LF: $state_request"
@@ -309,8 +448,26 @@ engine_response=${engine_response%$'\n'}
 [[ "$engine_response" != *$'\n'* && "$engine_response" != *$'\r'* ]] || die 'invalid launch engine records'
 launch_pattern='^[[:blank:]]*true[[:blank:]]+linux[[:blank:]]+(true|false)[[:blank:]]*$'
 [[ "$engine_response" =~ $launch_pattern ]] || die 'a complete Linux rootless engine response is required'
-[[ "${BASH_REMATCH[1]}" == false || "${CONTAINER_HOST:-}" == unix:///* ]] \
+service_remote=${BASH_REMATCH[1]}
+runtime_info=$engine_response
+[[ "$service_remote" == false || "${CONTAINER_HOST:-}" == unix:///* ]] \
     || die 'remote launch engine requires explicit same-host Unix CONTAINER_HOST'
+if ((restricted)); then
+    command -v python3 >/dev/null || die 'host Python 3 is required for restricted network policy validation'
+    [[ "$service_remote" == true ]] \
+        || die 'restricted networking currently requires the tested same-host Unix service; local-engine enforcement is unverified'
+    capture_response network_backend podman info --format '{{.Host.NetworkBackend}}' \
+        || die 'cannot verify restricted network backend'
+    network_backend=${network_backend%$'\n'}
+    capture_response network_version podman version --format '{{.Server.Version}}' \
+        || die 'cannot verify restricted network server version'
+    network_version=${network_version%$'\n'}
+    capture_response network_platform podman info --format '{{json .Host}}' \
+        || die 'cannot verify restricted platform security policy'
+    network_platform=${network_platform%$'\n'}
+elif ((qualification_probe)); then
+    die 'qualification probes require restricted networking'
+fi
 
 delegate=0
 if [[ "${OPENCODE_CONTAINER_PODMAN:-}" == 1 ]]; then
@@ -386,27 +543,54 @@ xdg_args=(
     --env "XDG_CACHE_HOME=$CONTAINER_HOME/.cache"
     --env "XDG_STATE_HOME=$CONTAINER_HOME/.local/state"
 )
-private_xdg() {
-    local variable=$1 fallback=$2 base path resolved
-    base=${!variable:-$HOME/$fallback}
-    [[ "$base" == /* ]] || die "$variable must be absolute: $base"
-    path=${base%/}/opencode
+# Shared state uses fixed host paths below HOME (host XDG_*_HOME variables do
+# not relocate it); only the configuration directory has an override.
+writable_state=()
+shared_state() {
+    local relative=$1 path=$2 resolved
     if [[ ! -e "$path" && ! -L "$path" ]]; then
         (umask 077; mkdir -p -- "$path") || die "cannot create private state: $path"
     fi
     resolved=$(check_private_dir state "$path") || exit 1
-    add_bind "$resolved" "$CONTAINER_HOME/$fallback/opencode" rw
+    add_bind "$resolved" "$CONTAINER_HOME/$relative" rw
+    writable_state+=("$resolved")
 }
 if [[ -n "$state_home" ]]; then
     # Isolated mode: the private directory is the persistent home.
     valid_bind_path "$state_home"
     home_args=(--volume "$state_home:$CONTAINER_HOME:rw")
+    writable_state+=("$state_home")
+    if ((trust_host_ca)); then
+        # Resolve first so an existing symlink cannot move the CA mount parent.
+        ca_parent=$(readlink -m -- "$state_home/ca")
+        [[ "$ca_parent" == "$state_home/ca" ]] || die "isolated CA mount parent escapes the state home: $state_home/ca"
+        if [[ ! -e "$ca_parent" ]]; then
+            (umask 077; mkdir -- "$ca_parent") || die "cannot create private state: $ca_parent"
+        fi
+        check_private_dir state "$ca_parent" >/dev/null || exit 1
+    fi
 else
     home_args=(--tmpfs "$CONTAINER_HOME:rw,exec,nosuid,nodev,mode=1777,size=512m")
-    private_xdg XDG_CONFIG_HOME .config
-    private_xdg XDG_DATA_HOME .local/share
-    private_xdg XDG_CACHE_HOME .cache
-    private_xdg XDG_STATE_HOME .local/state
+    shared_state .config/opencode "${config_override:-$HOME/.config/opencode}"
+    shared_state .local/share/opencode "$HOME/.local/share/opencode"
+    shared_state .cache/opencode "$HOME/.cache/opencode"
+    shared_state .local/state/opencode "$HOME/.local/state/opencode"
+fi
+ca_bundle=''
+if ((trust_host_ca)); then
+    if [[ -n "${OPENCODE_CONTAINER_CA_BUNDLE:-}" ]]; then
+        [[ -f "$OPENCODE_CONTAINER_CA_BUNDLE" ]] || die "OPENCODE_CONTAINER_CA_BUNDLE is not a file: $OPENCODE_CONTAINER_CA_BUNDLE"
+        ca_bundle=$(readlink -f -- "$OPENCODE_CONTAINER_CA_BUNDLE")
+    else
+        for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+            if [[ -f "$candidate" ]]; then
+                ca_bundle=$candidate
+                break
+            fi
+        done
+        [[ -n "$ca_bundle" ]] || die 'no default CA bundle found; set OPENCODE_CONTAINER_CA_BUNDLE to a bundle file'
+    fi
+    add_bind "$ca_bundle" "$CONTAINER_HOME/ca/bundle.pem" ro
 fi
 
 # Optional integrations are mounted only on exact opt-in; ~/.claude never is.
@@ -443,11 +627,26 @@ for variable_name in \
     OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_DEFAULT_PLUGINS \
     OPENCODE_DISABLE_LSP_DOWNLOAD OPENCODE_DISABLE_MODELS_FETCH \
     "${provider_names[@]}" "${extra_names[@]}"; do
+    if ((restricted)) && [[ " $PROXY_NAMES $PROTECTED_FLAGS " == *" $variable_name "* ]]; then
+        continue
+    fi
     if [[ -n "${!variable_name:-}" && "$forwarded" != *" $variable_name "* ]]; then
         forwarded+="$variable_name "
         run_args+=(--env "$variable_name")
     fi
 done
+# Protected literals follow forwarding; writable configuration cannot re-enable
+# these features (measured on OpenCode 1.18.3, see docs/validation.md).
+if ((restricted)); then
+    for variable_name in $PROTECTED_FLAGS; do
+        run_args+=(--env "$variable_name=1")
+    done
+fi
+if ((trust_host_ca)); then
+    for variable_name in $CA_NAMES; do
+        run_args+=(--env "$variable_name=$CONTAINER_HOME/ca/bundle.pem")
+    done
+fi
 
 # YOLO is a nonsecret literal added after forwarding so it wins.
 if ((yolo)); then
@@ -470,12 +669,51 @@ if [[ -t 0 && -t 1 ]]; then
     run_args+=(--tty)
 fi
 
-if ((shell_mode)); then
-    run_args+=(--entrypoint /bin/bash)
+if ((qualification_probe)); then
+    agent_args=()  # The shared helper supplies the fixed probe command.
+elif ((shell_mode)); then
+    ((restricted)) || run_args+=(--entrypoint /bin/bash)
     agent_args=()
 fi
 
+# Restricted sessions use the shared helper; this wrapper keeps only the
+# agent-specific command, environment, state and credentials.
+session_helper=(python3 -I "$SCRIPT_DIR/network/session.py")
+network_inputs=()
+qualification_inputs=()
+guard_digest=''
+if ((restricted)); then
+    network_inputs=(--installation "$SCRIPT_DIR" --writable "$workspace_mount"
+        --mount-target "$workspace_mount" --mount-target "$CONTAINER_HOME")
+    for state_path in "${writable_state[@]}"; do
+        network_inputs+=(--writable "$state_path")
+    done
+    if [[ "$network_mode" == provider ]]; then
+        network_inputs+=(--policy "$OPENCODE_CONTAINER_NETWORK_POLICY"
+            --profile "$OPENCODE_CONTAINER_NETWORK_PROFILE" --proxy-image "$OPENCODE_CONTAINER_EGRESS_IMAGE"
+            --runtime "$OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR")
+    fi
+    prepare_inputs=(--mode "$network_mode" --server-version "$network_version"
+        --backend "$network_backend" --endpoint "${CONTAINER_HOST:-}" --engine "$runtime_info")
+    if ((qualification_probe)); then
+        prepare_inputs+=(--probe --qualification-input "${OPENCODE_CONTAINER_QUALIFICATION_INPUT:-}"
+            --workspace "$WORKSPACE")
+    fi
+    prepared=$(printf '%s\n' "$network_platform" | "${session_helper[@]}" prepare "${network_inputs[@]}" "${prepare_inputs[@]}") \
+        || exit 1
+    read -r guard_digest qualification_token qualification_tls <<< "$prepared"
+    if ((qualification_probe)); then
+        qualification_inputs=(--probe --token "$qualification_token" --workspace "$WORKSPACE"
+            --qualification-input "${OPENCODE_CONTAINER_QUALIFICATION_INPUT:-}")
+        [[ "$qualification_tls" != 1 ]] || qualification_inputs+=(--tls)
+    fi
+fi
+
+# Every build, including the automatic build of a missing image, is maintenance.
+maintenance=0
+[[ "${OPENCODE_CONTAINER_MAINTENANCE:-}" != 1 ]] || maintenance=1
 build_current_image() {
+    ((maintenance)) || die "image $IMAGE needs a build; prepare it with exact OPENCODE_CONTAINER_MAINTENANCE=1 (host pulls and build RUN steps are outside runtime filtering)"
     podman build --tag "$IMAGE" --file "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR"
 }
 if ((build_image)); then
@@ -490,6 +728,25 @@ else
     fi
     build_current_image
 fi
+if [[ "$network_mode" == provider ]]; then
+    if podman image exists "$OPENCODE_CONTAINER_EGRESS_IMAGE"; then
+        :
+    else
+        image_status=$?
+        [[ "$image_status" == 1 ]] || die 'cannot inspect immutable egress proxy image'
+        ((maintenance)) && [[ "$OPENCODE_CONTAINER_EGRESS_IMAGE" == *@sha256:* ]] \
+            || die 'proxy image is absent; prepare the pinned artifact under explicit operator maintenance authorization (OPENCODE_CONTAINER_MAINTENANCE=1 and a registry digest)'
+        podman pull "$OPENCODE_CONTAINER_EGRESS_IMAGE"
+    fi
+fi
+# Restricted sessions and their qualification bind the immutable image ID.
+session_image=$IMAGE
+if ((restricted)); then
+    capture_response session_image podman image inspect --format '{{.Id}}' "$IMAGE" \
+        || die 'cannot resolve restricted runtime image identity'
+    session_image=${session_image%$'\n'}
+    [[ "$session_image" =~ ^(sha256:)?[a-f0-9]{64}$ ]] || die 'invalid restricted runtime image identity'
+fi
 
 # Lifecycle state belongs exclusively to this invocation.
 container_id=''
@@ -499,6 +756,8 @@ session_dir=''
 session_token=''
 creation_pending=0
 shutdown_deadline=0
+qualification_check_pid=''
+session_start_pid=''
 ownership_label=io.opencode-container.session
 
 cleanup_warning() {
@@ -545,6 +804,26 @@ reap_client() {
         wait "$child" 2>/dev/null || true
     fi
 }
+# Restricted helpers: TERM, a bounded grace period, then KILL and reap.
+# shellcheck disable=SC2329 # Reached through EXIT/signal cleanup.
+reap_helper() {
+    local child=$1 grace=$2 until
+    child_running "$child" || { wait "$child" 2>/dev/null || true; return 0; }
+    kill -TERM "$child" 2>/dev/null || true
+    until=$((SECONDS + grace))
+    while child_running "$child" && ((SECONDS < until)); do sleep 0.05; done
+    if child_running "$child"; then
+        cleanup_warning "restricted helper $child did not confirm cleanup before the deadline"
+        kill -KILL "$child" 2>/dev/null || true
+    fi
+    until=$((SECONDS + 1))
+    while child_running "$child" && ((SECONDS < until)); do sleep 0.05; done
+    if child_running "$child"; then
+        cleanup_warning "restricted helper $child could not be reaped within deadline"
+    else
+        wait "$child" 2>/dev/null || true
+    fi
+}
 # Read exact record boundaries, rejecting NUL and additional final LF bytes.
 read_cid() {
     local file=$1 candidate='' has_nul=0
@@ -582,6 +861,19 @@ shutdown() {
     trap '' TERM INT HUP
     set +e
     shutdown_deadline=$((SECONDS + 20))
+    if [[ -n "$qualification_check_pid" ]]; then
+        reap_helper "$qualification_check_pid" 13
+        qualification_check_pid=''
+    fi
+    if [[ -n "$session_start_pid" ]]; then
+        # The session helper owns a separate process group. Reap the whole
+        # group before its leader, including an engine client that ignores TERM.
+        kill -TERM -- "-$session_start_pid" 2>/dev/null || true
+        sleep 0.1
+        kill -KILL -- "-$session_start_pid" 2>/dev/null || true
+        reap_helper "$session_start_pid" 1
+        session_start_pid=''
+    fi
     if [[ -n "$session_dir" ]]; then
         if ((creation_pending)); then
             create_until=$((SECONDS + 1))
@@ -609,6 +901,11 @@ shutdown() {
                 cleanup_warning 'creation outcome unresolved; client cancellation does not prove request cancellation'
             fi
         fi
+        if [[ "$network_mode" == provider ]]; then
+            # Owned proxy recovery/removal and diagnostics share the remaining budget.
+            "${session_helper[@]}" stop --session "$session_dir" --deadline "$((shutdown_deadline - SECONDS))" \
+                --container "${container_id:-unknown}" || true
+        fi
         rm -rf -- "$session_dir"
     fi
     exit "$primary_status"
@@ -617,12 +914,50 @@ trap 'shutdown "$?"' EXIT
 trap 'shutdown 143 TERM' TERM
 trap 'shutdown 130 INT' INT
 trap 'shutdown 129 HUP' HUP
-session_dir=$(umask 077; mktemp -d) || die 'cannot create private session records'
+if [[ "$network_mode" == provider ]]; then
+    session_dir=$(umask 077; mktemp -d -- "$OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR/session.XXXXXXXXXXXX") \
+        || die 'cannot create private session directory in OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR'
+else
+    session_dir=$(umask 077; mktemp -d) || die 'cannot create private session records'
+fi
 session_token=${session_dir##*/}
 cid_file=$session_dir/cid
 create_output=$session_dir/output
 create_error=$session_dir/error
 (umask 077; : > "$create_output"; : > "$create_error")
+printf 'opencode-container: network mode=%s\n' "$network_mode" >&2
+if ((restricted && qualification_probe == 0)); then
+    OPENCODE_CONTAINER_IMAGE="$session_image" python3 -I "$SCRIPT_DIR/network/qualify.py" check &
+    qualification_check_pid=$!
+    qualification_status=0
+    wait "$qualification_check_pid" || qualification_status=$?
+    qualification_check_pid=''
+    ((qualification_status == 0)) || exit "$qualification_status"
+fi
+if [[ "$network_mode" == provider ]]; then
+    "${session_helper[@]}" start "${network_inputs[@]}" "${qualification_inputs[@]}" --session "$session_dir" \
+        --guard-digest "$guard_digest" >"$session_dir/policy.identity" &
+    session_start_pid=$!
+    start_status=0
+    wait "$session_start_pid" || start_status=$?
+    session_start_pid=''
+    ((start_status == 0)) || exit "$start_status"
+fi
+if ((restricted)); then
+    application=()
+    if ((shell_mode)); then
+        application=(/bin/bash)
+    elif ((qualification_probe == 0)); then
+        application=(/usr/local/bin/opencode "${agent_args[@]}")
+    fi
+    "${session_helper[@]}" agent-args --installation "$SCRIPT_DIR" --mode "$network_mode" \
+        --session "$session_dir" --guard-digest "$guard_digest" "${qualification_inputs[@]}" \
+        -- "${application[@]}" >"$session_dir/agent.args"
+    mapfile -d '' -t restricted_args <"$session_dir/agent.args"
+    [[ "${restricted_args[0]:-}" =~ ^[0-9]+$ ]] || die 'invalid restricted session arguments'
+    run_args+=("${restricted_args[@]:1:${restricted_args[0]}}")
+    agent_args=("${restricted_args[@]:$((1 + restricted_args[0]))}")
+fi
 
 # Listing and collision queries are tracked clients too, so signals can cancel them.
 creation_lookup() {
@@ -649,7 +984,7 @@ for ((attempt=0; attempt<20; attempt++)); do
     creation_pending=1
     (umask 077; exec podman create --name "$name" --cidfile "$cid_file" \
         --label "$ownership_label=$session_token" --label "io.opencode-container.instance=$next_index" \
-        "${run_args[@]}" "$IMAGE" "${agent_args[@]}" </dev/null >"$create_output" 2>"$create_error") &
+        "${run_args[@]}" "$session_image" "${agent_args[@]}" </dev/null >"$create_output" 2>"$create_error") &
     create_pid=$!
     create_status=0
     wait "$create_pid" || create_status=$?

@@ -7,7 +7,7 @@ Define the persistent and ephemeral filesystem boundaries and environment inputs
 ## Requirements
 
 ### Requirement: Private persistent state preflight
-Before image operations the wrapper SHALL privately create missing OpenCode config/data/cache/state directories, physically resolve each, and verify caller ownership, read/write/traverse access, and no group/other permission bits. It MUST reject insecure existing paths without chmod/chown or credential copying. Creation MUST NOT change the caller's umask.
+Before image operations the wrapper SHALL privately create missing OpenCode config/data/cache/state directories at their fixed host paths, physically resolve each, and verify caller ownership, read/write/traverse access, and no group/other permission bits. It MUST reject insecure existing paths without chmod/chown or credential copying. Creation MUST NOT change the caller's umask.
 
 #### Scenario: Missing directories
 - **WHEN** one or more writable OpenCode XDG directories do not exist
@@ -19,17 +19,26 @@ Before image operations the wrapper SHALL privately create missing OpenCode conf
 - **AND** existing permissions, ownership, and credentials remain unchanged
 
 ### Requirement: Consistent effective HOME and XDG layout
-Sessions SHALL use `HOME=/opencode-home` with the four XDG bases below it. Without `OPENCODE_CONTAINER_STATE_DIR`, `/opencode-home` SHALL be an ephemeral tmpfs, and the caller's validated host OpenCode XDG directories SHALL be mounted at fixed paths below it. Other host HOME content MUST NOT become writable or be mounted implicitly.
+Sessions SHALL use `HOME=/opencode-home` with the four XDG bases below it. Without `OPENCODE_CONTAINER_STATE_DIR`, `/opencode-home` SHALL be an ephemeral tmpfs, and the caller's validated OpenCode directories at fixed paths below the host home SHALL be mounted at fixed paths below it; host `XDG_*_HOME` variables SHALL NOT relocate them. Other host HOME content MUST NOT become writable or be mounted implicitly.
 
 #### Scenario: Default layout with host state
 - **WHEN** a session starts without `OPENCODE_CONTAINER_STATE_DIR`
 - **THEN** `HOME` is `/opencode-home`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME` are `/opencode-home/.config`, `/opencode-home/.local/share`, `/opencode-home/.cache` and `/opencode-home/.local/state`
-- **AND** the caller's host XDG OpenCode directories are mounted read/write at the `opencode` subdirectory of each base
+- **AND** the caller's fixed host OpenCode directories are mounted read/write at the `opencode` subdirectory of each base
 - **AND** files written elsewhere below `/opencode-home` do not survive the session
 
 #### Scenario: Nonstandard HOME and symlinked XDG base
-- **WHEN** the host HOME is nonstandard and a host XDG base resolves through a symlink
+- **WHEN** the host HOME is nonstandard and a fixed host OpenCode directory resolves through a symlink
 - **THEN** the physical validated OpenCode directories are mounted at the fixed destinations under `/opencode-home`
+
+#### Scenario: Host XDG variables are set
+- **WHEN** the host sets `XDG_CONFIG_HOME=/srv/config` and `XDG_DATA_HOME=/srv/data`
+- **THEN** the session still mounts `~/.config/opencode`, `~/.local/share/opencode`, `~/.cache/opencode` and `~/.local/state/opencode` below the caller's home, and nothing below `/srv` is created or mounted
+
+#### Scenario: Configuration directory override
+- **WHEN** `OPENCODE_CONTAINER_CONFIG_DIR` names a private absolute directory
+- **THEN** that directory is validated like the other state and mounted at `/opencode-home/.config/opencode`, while the data, cache and state directories keep their fixed paths
+- **AND** a relative value fails before engine queries, naming the variable
 
 ### Requirement: Physical bind paths and integration boundaries
 The wrapper SHALL preserve physical absolute workspace and state bind sources, support spaces and commas without argument splitting, and start in the original physical working directory. Only the workspace, four OpenCode state directories, and explicitly enabled service socket SHALL be host-writable. Opted-in `.agents` and `/etc/opencode` mounts MUST be read-only.
@@ -58,18 +67,18 @@ The root filesystem SHALL remain read-only with automatic read-only tmpfs provis
 - **AND** interactive OpenTUI startup can extract and load its shared library from `/tmp`
 
 ### Requirement: Explicit environment allowlist without credential arguments
-The wrapper MUST forward only nonempty inherited values from three sources:
-- the base allowlist of terminal, locale, proxy and OpenCode configuration variables;
-- the selected provider profile;
-- the names listed in `OPENCODE_CONTAINER_ENV_VARS`.
-
-Values MUST be forwarded by variable name and kept out of engine-client arguments. Deliberate nonsecret identity/path assignments SHALL remain explicit. No forwarded or image-default environment setting MUST override disabled delegation.
+The wrapper MUST forward only nonempty inherited values from the base allowlist (terminal, locale, proxy and OpenCode configuration variables), the selected provider profile and `OPENCODE_CONTAINER_ENV_VARS`. Values MUST be forwarded by name and kept out of engine-client arguments. Nonsecret identity/path assignments SHALL remain explicit. Forwarded and image-default settings MUST NOT override disabled delegation. Offline and provider modes SHALL forward no inherited proxy or CA variable.
 
 #### Scenario: Credential forwarding
 - **WHEN** a key of the selected provider, `OPENCODE_SERVER_PASSWORD`, a key of another provider and an unlisted variable are set
 - **THEN** the selected key and the password reach the session through `--env VARIABLE` and are absent from wrapper-generated Podman arguments
 - **AND** the other provider's key and the unlisted value are not forwarded
 - **AND** documentation states that container processes and engine inspection can still observe forwarded credentials
+
+#### Scenario: Host proxy settings in a restricted mode
+- **WHEN** the host sets `HTTPS_PROXY`, `no_proxy` and `NODE_EXTRA_CA_CERTS`, and the mode is offline or provider
+- **THEN** none of these host values reaches the session, and provider sessions see only the relay values and `NO_PROXY=localhost,127.0.0.1,::1`
+- **AND** in unrestricted mode the base allowlist forwards the proxy variables as before
 
 ### Requirement: Preserve sandbox identity and hardening
 Sessions SHALL run with `--userns=keep-id --user <uid>:<gid>` set at launch, so that processes have the caller's numeric identity without an identity baked into the image. Every OpenCode and shell session SHALL drop all capabilities and enable no-new-privileges, with or without delegation and YOLO. The wrapper SHALL NOT add a capability back to resolve an incompatibility.
@@ -108,7 +117,7 @@ The wrapper SHALL NOT mount `~/.claude`, or any path below it, into an OpenCode 
 - **AND** no engine query, state directory or image operation occurs
 
 ### Requirement: Provider credentials follow the selected provider
-`OPENCODE_CONTAINER_PROVIDER` SHALL select the single provider profile whose variables are forwarded. Accepted values are exactly `anthropic`, `openai`, `google`, `openrouter`, `amazon-bedrock`, `azure`, `opencode` and `none`. An unset value SHALL behave as `none`. Variables of unselected profiles, `GH_TOKEN` and `GITHUB_TOKEN` SHALL NOT be forwarded unless the operator lists them explicitly.
+`OPENCODE_CONTAINER_PROVIDER` SHALL select the single provider profile whose variables are forwarded; accepted values are `anthropic`, `openai`, `google`, `openrouter`, `amazon-bedrock`, `azure`, `opencode` and `none`, the default when unset. Other profiles' variables, `GH_TOKEN` and `GITHUB_TOKEN` SHALL NOT be forwarded unless listed explicitly. Offline mode SHALL forward no provider variable; provider mode SHALL forward only the network profile's credential.
 
 #### Scenario: Profile variable sets
 - **WHEN** a provider value is selected
@@ -139,6 +148,12 @@ The wrapper SHALL NOT mount `~/.claude`, or any path below it, into an OpenCode 
 - **WHEN** `OPENCODE_CONTAINER_PROVIDER` is empty, differs in case, or names an unsupported provider
 - **THEN** the wrapper exits with status 1 naming the variable and listing the accepted values, before any engine query or state creation
 
+#### Scenario: Restricted modes select the credential from the network profile
+- **WHEN** provider mode uses profile `openrouter-api` with `OPENCODE_CONTAINER_PROVIDER` unset, and `OPENROUTER_API_KEY` and `OPENAI_API_KEY` are set
+- **THEN** only `OPENROUTER_API_KEY` reaches the session, by name
+- **AND** `OPENAI_BASE_URL` is not forwarded in restricted modes
+- **AND** the same launch with `OPENCODE_CONTAINER_PROVIDER=openai` fails before engine queries, naming both settings
+
 ### Requirement: Migration notice for no longer forwarded credentials
 When `OPENCODE_CONTAINER_PROVIDER` is unset and a credential variable that earlier releases forwarded is nonempty on the host, the wrapper SHALL print one stderr notice before the session starts. The notice SHALL name those variables without values and point to `OPENCODE_CONTAINER_PROVIDER` and `OPENCODE_CONTAINER_ENV_VARS`. Any accepted provider value SHALL suppress it.
 
@@ -157,7 +172,7 @@ When `OPENCODE_CONTAINER_PROVIDER` is unset and a credential variable that earli
 - **THEN** no notice is printed
 
 ### Requirement: Operator-listed extra variables
-`OPENCODE_CONTAINER_ENV_VARS` SHALL accept a whitespace-separated list of variable names, and each nonempty listed variable SHALL be forwarded by name. A token that is not a valid name (`[A-Za-z_][A-Za-z0-9_]*`) SHALL stop with status 1 naming the token before any engine query or state creation. Names the wrapper sets authoritatively SHALL be skipped with a stderr warning.
+`OPENCODE_CONTAINER_ENV_VARS` SHALL accept a whitespace-separated list of variable names, and each nonempty listed variable SHALL be forwarded by name. A token that is not a valid name (`[A-Za-z_][A-Za-z0-9_]*`) SHALL stop with status 1 naming the token before any engine query or state creation. Names the wrapper sets authoritatively SHALL be skipped with a stderr warning. In offline and provider modes the proxy, CA and protected optional-traffic variables SHALL also be treated as authoritative.
 
 #### Scenario: Extra names forwarded
 - **WHEN** `OPENCODE_CONTAINER_ENV_VARS="GH_TOKEN DATABASE_URL"` is set and both variables are nonempty
@@ -171,6 +186,10 @@ When `OPENCODE_CONTAINER_PROVIDER` is unset and a credential variable that earli
 - **WHEN** the list contains `HOME`, `USER`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `CONTAINER_HOST` or `CONTAINER_CONNECTION`
 - **THEN** the wrapper warns that the name is skipped and the corresponding session setting is unchanged
 - **AND** with delegation disabled the session still has `CONTAINER_HOST` unset
+
+#### Scenario: Restricted mode reserves network variables
+- **WHEN** offline or provider mode runs with `OPENCODE_CONTAINER_ENV_VARS="HTTPS_PROXY SSL_CERT_FILE OPENCODE_DISABLE_AUTOUPDATE"`
+- **THEN** the wrapper warns that each name is skipped, and the session keeps the helper, CA and protected values
 
 ### Requirement: Exposure controls are documented
 Wrapper help and the README SHALL list `OPENCODE_CONTAINER_PROVIDER` with its accepted values, `OPENCODE_CONTAINER_ENV_VARS`, `OPENCODE_CONTAINER_AGENTS_DIR` and `OPENCODE_CONTAINER_SYSTEM_CONFIG`. The README SHALL give the provider-to-variable table, state that `~/.claude` is never mounted, and describe the migration for users who relied on the earlier mounts and forwarding. Help SHALL remain free of engine queries and state creation.
@@ -213,7 +232,7 @@ Before starting the application, each launch SHALL inspect the created container
 - **AND** a process count beyond the process limit fails inside the session
 
 ### Requirement: Isolated persistent state option
-`OPENCODE_CONTAINER_STATE_DIR` SHALL select a private host directory mounted read/write as the persistent `/opencode-home`, replacing the shared host XDG state for that session. The wrapper SHALL create and validate it with the same rules as the shared state before any engine query, without repairing permissions or importing credentials. It SHALL NOT overlap the workspace mount.
+`OPENCODE_CONTAINER_STATE_DIR` SHALL select a private host directory mounted read/write as the persistent `/opencode-home`, replacing the shared state for that session. The wrapper SHALL create and validate it with the same rules as the shared state before any engine query, without repairing permissions or importing credentials. It SHALL NOT overlap the workspace mount. It SHALL conflict with a nonempty `OPENCODE_CONTAINER_CONFIG_DIR`. An empty value SHALL select shared state, like an unset one.
 
 #### Scenario: Isolated state selected
 - **WHEN** `OPENCODE_CONTAINER_STATE_DIR` names a missing absolute directory
@@ -221,12 +240,20 @@ Before starting the application, each launch SHALL inspect the created container
 - **AND** the host XDG OpenCode directories are not mounted
 
 #### Scenario: Insecure or overlapping state directory
-- **WHEN** the selected directory is relative or empty, belongs to another user, has group or other permissions, or equals, contains or lies inside the workspace mount
+- **WHEN** the selected directory is relative, belongs to another user, has group or other permissions, or equals, contains or lies inside the workspace mount
 - **THEN** the wrapper exits with status 1 naming the variable and path, before any engine query, and changes nothing
 
 #### Scenario: State persists
 - **WHEN** a file is written below `/opencode-home` in one session with the same state directory
 - **THEN** the next session with that directory sees it
+
+#### Scenario: Isolated state with a configuration override
+- **WHEN** both `OPENCODE_CONTAINER_STATE_DIR` and a nonempty `OPENCODE_CONTAINER_CONFIG_DIR` are set
+- **THEN** the wrapper exits with status 1 naming both variables, before any engine query or state creation
+
+#### Scenario: Empty value selects shared state
+- **WHEN** `OPENCODE_CONTAINER_STATE_DIR` is set to an empty value
+- **THEN** the session uses the shared state layout, as with an unset variable
 
 ### Requirement: Hardening controls are documented
 Wrapper help and the README SHALL document the budget variables with defaults and accepted formats, the lifetime variable, the state directory option, the unsafe-workspace override with the refused directories, and that capabilities are dropped in every mode. They SHALL state that budgets and tmpfs sizes do not bound workspace or state storage growth. Help SHALL remain free of engine queries and state creation.

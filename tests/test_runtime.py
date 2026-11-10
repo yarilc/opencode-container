@@ -83,7 +83,8 @@ class RuntimeTests(unittest.TestCase):
         self.project = self.base / 'project with spaces,commas'
         self.project.mkdir()
         self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.home), 'LANG': 'C.UTF-8',
-                    'OPENCODE_CONTAINER_PODMAN': '0'}
+                    'OPENCODE_CONTAINER_PODMAN': '0', 'OPENCODE_CONTAINER_NETWORK': 'unrestricted',
+                    'OPENCODE_CONTAINER_MAINTENANCE': '1'}
         if os.environ.get('CONTAINER_HOST'): self.env['CONTAINER_HOST'] = os.environ['CONTAINER_HOST']
         self.socket = os.environ.get('OPENCODE_CONTAINER_PODMAN_SOCKET', '')
         if not self.socket:
@@ -373,12 +374,15 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
         context=self.base/'context';context.mkdir()
         shutil.copyfile(ROOT/'.containerignore',context/'.containerignore')
         for name in ('unknown','.env','.git/config','auth.json','.local/state/token','opencode-entrypoint',
-                     'nested/Containerfile','nested/opencode-entrypoint','nested/.containerignore'):
+                     'nested/Containerfile','nested/opencode-entrypoint','nested/.containerignore',
+                     'network/relay.py','network/mux.py','network/proxy.py','network/bin/sandbox-egress-guard',
+                     'nested/network/relay.py'):
             path=context/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('SYNTHETIC')
         recipe=context/'Containerfile'
         recipe.write_text('FROM '+IMAGE+'\nUSER root\nCOPY . /context\n'
-                          'RUN test "$(find /context -type f | wc -l)" = 2 && test -f /context/Containerfile '
-                          '&& test -f /context/.containerignore\n')
+                          'RUN test "$(find /context -type f | wc -l)" = 4 && test -f /context/Containerfile '
+                          '&& test -f /context/.containerignore && test -f /context/network/relay.py '
+                          '&& test -f /context/network/mux.py\n')
         iid=self.base/'context-iid'
         try:
             self.assert_success(self.engine('build','--no-cache','--iidfile',str(iid),str(context),timeout=180))
@@ -410,6 +414,7 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
                  '--volume',f'{self.base}:{self.base}:rw','--volume',f'{self.home}:{self.home}:rw',
                  '--volume',f'{host_socket}:{visible}:rw','--env','CONTAINER_HOST=unix://'+visible,
                  '--env','HOME='+str(self.home),'--env','OPENCODE_CONTAINER_PODMAN=1',
+                 '--env','OPENCODE_CONTAINER_NETWORK=unrestricted',
                  '--workdir',str(self.project),'--entrypoint','/bin/bash',runner,str(WRAPPER),'--container-shell']
         result=subprocess.run(command,input='set -e\ntest -S /run/podman/podman.sock\npodman info >/dev/null\nprintf nested > nested-file\n',
                               capture_output=True,text=True,timeout=90)

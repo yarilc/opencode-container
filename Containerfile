@@ -48,5 +48,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache /opencode-home \
     && mkdir -m 1777 /opencode-home
 
+# Agent-side relay for restricted sessions; the guard is mounted from the
+# protected installation at launch, never baked into this image.
+COPY network/relay.py network/mux.py /opt/sandbox-egress/
+
 WORKDIR /workspace
 ENTRYPOINT ["opencode"]

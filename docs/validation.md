@@ -345,3 +345,143 @@ Known limitations:
   image user name, for example `node` for UID 1000. `USER` is still the host
   name.
 - An image built on an AVX2 host must not be copied to a host without AVX2.
+
+## Network egress port (`add-network-egress`): 2026-11-10
+
+Target: WSL2 kernel 6.6.87.2, Podman client 4.3.1 and server 4.9.3, Netavark.
+Image `localhost/opencode-cli:latest` (`e606ff13a67e`), OpenCode 1.18.3; the
+platform binary `opencode-linux-x64/bin/opencode` has SHA-256
+`fdf58364c969a144fff0ae3a30f2fb6e705ada06864842613de1f9ecc70feb20`.
+
+### Measured OpenCode endpoints (static inventory and logging proxy)
+
+The inventory combines the URL strings in the 1.18.3 binary with credential-free
+runs (`opencode models`, `opencode run`, `opencode upgrade`) inside
+`--network=none` containers. `HTTPS_PROXY` pointed at a loopback proxy that
+logged every request and answered 403. Each run used dummy keys.
+
+| Use | Host | Notes |
+| --- | --- | --- |
+| Anthropic API | `api.anthropic.com` | `opencode run -m anthropic/...` |
+| OpenAI API | `api.openai.com` | `opencode run -m openai/...` |
+| OpenRouter | `openrouter.ai` | `opencode run -m openrouter/...` |
+| OpenCode Zen | `opencode.ai` | Provider `opencode`, `https://opencode.ai/zen/v1`; OpenCode Go uses `https://opencode.ai/zen/go/v1` on the same host |
+| Model catalog | `models.dev` | Fetched at startup unless `OPENCODE_DISABLE_MODELS_FETCH`; the binary carries a bundled snapshot that `opencode models` uses without network |
+| Session sharing | `opncd.ai` | Contacted with `share: "auto"`; not the Zen host |
+| Updates and `opencode upgrade` | `registry.npmjs.org` | `opencode-ai/latest` |
+| Configuration dependency install | `registry.npmjs.org` | `@opencode-ai/plugin` is installed in the background into every configuration directory, unconditionally; failure only logs a WARN |
+| Other strings | `opencode.ai` (themes, schema, docs), `api.opencode.ai`, `app.opencode.ai`, `console.opencode.ai`, `github.com`, `api.github.com`, `raw.githubusercontent.com`, `api.githubcopilot.com`, `auth.openai.com` | GitHub app, web console, Copilot and ChatGPT login paths; not part of any profile |
+
+Login: the four profiles use API keys from the environment. Keys stored by
+`opencode auth login` were not measured. The OAuth methods (ChatGPT, GitHub
+Copilot, GitLab) are not part of any profile and remain unsupported in
+restricted modes.
+
+### Optional-traffic controls
+
+| Control | Effect in 1.18.3 | Precedence |
+| --- | --- | --- |
+| `OPENCODE_DISABLE_AUTOUPDATE` | Skips the startup update check | Either the variable or `autoupdate: false` disables; `autoupdate: true` cannot re-enable it |
+| `OPENCODE_DISABLE_MODELS_FETCH` | No `models.dev` request; the cached or bundled catalog is used | No configuration key |
+| `OPENCODE_DISABLE_SHARE` (`1` or `true`) | Share synchronization returns early; no `opncd.ai` request with `share: "auto"` | Wins over `share: "auto"` |
+| `OPENCODE_DISABLE_DEFAULT_PLUGINS` | Internal plugins are not loaded | Plugins named in configuration still try `registry.npmjs.org` and are denied |
+| `OPENCODE_DISABLE_LSP_DOWNLOAD` | LSP binaries are not downloaded | No configuration key |
+| None | Background `@opencode-ai/plugin` install and an explicit `opencode upgrade` | The proxy denies them; startup continues |
+
+With all five variables set and `OPENCODE_CONFIG_CONTENT='{"share":"auto","autoupdate":true}'`,
+`opencode run` contacted only the provider host and `registry.npmjs.org`. Without
+them, the same run also contacted `models.dev` and `opncd.ai`.
+
+### Bun client behavior
+
+- **Proxy:** OpenCode's HTTPS requests use CONNECT through `HTTPS_PROXY`.
+- **Loopback bypass:** with `NO_PROXY=localhost,127.0.0.1,::1`, `opencode run --attach http://127.0.0.1:4096` reached the local server directly. With an empty `NO_PROXY`, the same request went to the proxy as `POST http://127.0.0.1:4096/session` and failed. The loopback bypass is therefore required.
+- **CA trust:** a fixture CA with a `CA:FALSE`, `serverAuth` leaf for `api.anthropic.com` was tested behind a CONNECT proxy:
+  - without CA variables, OpenCode refused the server (`unable to verify the first certificate`);
+  - with `NODE_EXTRA_CA_CERTS` or `SSL_CERT_FILE`, the request `POST /v1/messages` reached the fixture.
+
+### OpenCode under the guard (offline)
+
+The guard was packaged with `network/build-guard.sh` under
+`OPENCODE_CONTAINER_MAINTENANCE=1` from toolchain
+`localhost/opencode-guard-toolchain:development`. The toolchain ID is
+`0b69ba43c894…`; it is the reference toolchain, rebuilt from cache. The guard
+SHA-256 is `0c647dfea75667a46a8cd4cc4dfea4ee3d10363752ea7ce5957162bacd6d7ec9`,
+identical to Claude and Codex. Every run below used `--network=none`, private
+PID and IPC namespaces, a read-only root, no capabilities and
+no-new-privileges.
+
+| Check | Result |
+| --- | --- |
+| `opencode run` against a loopback OpenAI-compatible stub (`@ai-sdk/openai-compatible`, `baseURL` `http://127.0.0.1:18080/v1`) | The stub returned a `bash` tool call. The tool ran and wrote the sentinel to the workspace, owned by the caller UID 1000, and the second turn returned `fixture-done` |
+| OpenTUI in a PTY | Rendered, then exited with status 0 after two Ctrl+C presses |
+| `bwrap` | Fails (`Failed to make / slave: Operation not permitted`). The OpenCode 1.18.3 binary contains no `bwrap` or `bubblewrap` reference, so OpenCode never uses it; it stays in the image only as a general tool |
+| Named Unix socket in `/tmp` | Denied (`PermissionError`), as specified; neither the `run`, tool and TUI paths nor the local server needed one |
+| LSP servers and formatters | None are preinstalled. Automatic LSP downloads are disabled in restricted modes, so those features fail until a maintenance change preinstalls the servers |
+| Layout with `/tmp`, `/var/tmp` and `/opencode-home` as executable tmpfs mounts and the four state directories bind-mounted below the home | The guard reported `enforced revision=abi3-seccomp-mux-v1 abi=3`; `opencode --version` printed 1.18.3; executing a file from `/tmp` worked; OpenCode wrote `opencode.db` and `log/` to the data bind, owned by the caller |
+
+### Shared reference, artifacts and suites
+
+| Check | Result |
+| --- | --- |
+| Shared copy | `git archive` of `network/`, `setup/diagnostics.py` and 21 shared tests from `sandbox-ref-2`; `tests/test_guard.py` recopied from `sandbox-ref-3`. `diff -r` against the `sandbox-ref-3` tree: no differences |
+| Shared-test defect | Under the guard, `tests/test_guard.py` ran `<agent> --version` with a read-only root and no writable home. OpenCode writes `$HOME/.local` at startup, so the test failed with `EROFS`. Fixed in `claude-container` (tag `sandbox-ref-3`, commit `449ce60`) by mounting an empty `notmpcopyup` tmpfs at the profile home; adopted by Codex and this repository |
+| `tests/test_reference_copy.py` (on the host, with the sibling checkout at the tag) | Passed: 5 tests, including an injected byte change, a missing and an extra file, and an injected `OpenCode` literal |
+| Profile and policy | `agent/profile.json` validates; the policy `opencode-2026-11-10-v1` validates against the profile rules; the identifiers `opencode`, `anthropic`, `openai` and `openrouter` occur in no shared file |
+| Toolchain `localhost/opencode-guard-toolchain:development` | ID `0b69ba43c894c4599fcfc0fa7b5e3c150ec26fcf7a2690e3c83708688ff9402c` (the reference toolchain) |
+| Guard | SHA-256 `0c647dfea75667a46a8cd4cc4dfea4ee3d10363752ea7ce5957162bacd6d7ec9`, identical to Claude and Codex |
+| Proxy `localhost/opencode-egress:local` | ID `13adbfafd7bdc49393c142ecb7ede21ae6e1a7e4c1d842b1518078cdb5590621`, the same agent-neutral image as Codex |
+| Runtime image `localhost/opencode-cli:latest` | ID `6a65050ddeb734005fe908c8a8f6b6f00ede5c457e7dfadc91e8ee4dd8707893`, OpenCode 1.18.3; `/opt/sandbox-egress/relay.py` and `mux.py` match `network/` by SHA-256 |
+| `tests/test_image_pins.py` | Passed: 2 tests, including an injected `OPENCODE_VERSION` divergence that names both versions |
+| Build-context probe (`test_runtime.py::test_build_context`) | Exactly four files reach the build; nested lookalikes, `network/proxy.py` and `network/bin` are excluded |
+
+### Runner modes (`bash tests/run-runtime.sh <mode>`, final run)
+
+| Mode | Result |
+| --- | --- |
+| `--wrapper` | Passed: 50 tests, covering modes, delegation, maintenance, proxy image, state, CA, offline and provider order and arguments, credentials per profile, protected values, reserved names, interrupted helpers and qualification entry points |
+| `--shared` | Passed: 133 tests, 27 skipped (real-engine checks, run by the modes below) |
+| `--qualification` | Passed: 18 tests |
+| `--network-feasibility` | Passed: 1 test |
+| `--network-policy` | Passed: 14 tests |
+| `--mux` | Passed: 26 tests |
+| `--guard` | Passed: 19 tests, 1 skipped (the idle check), including the three guarded multiplex checks through the OpenCode `test_network_runtime.py` fixture |
+| `--guard-idle` | Passed: 1 test (the idle provider channel resumes after 305 seconds) |
+| default (unrestricted runtime suite) | Passed: 19 tests |
+| `--network` | 21 tests. One failure: `test_agent_budgets_are_effective_and_lifetime_cleans_owned_proxy` exited with status 255 without the lifetime notice. The notice compares whole seconds, the known lifetime limitation. Rerun alone, the test passed |
+
+The `--network` suite covers:
+- offline and provider acceptance through the wrapper after `--container-qualify`;
+- denials: IPv4, IPv6, DNS and UDP egress, host and abstract sockets;
+- the controlled TLS profiles: `controlled-test` and the four base profiles, with exact addresses;
+- policy denials of `models.dev`, `opncd.ai`, `registry.npmjs.org` and another provider's host under `controlled-opencode-zen`;
+- redirect, IP-literal, deceptive-suffix, port and administration denials;
+- WebSocket upgrade, proxy loss, budgets and hardening;
+- CA trust off and on;
+- interrupted creation, bootstrap failures and readiness identities;
+- arguments, stdin, status and TTY in both state modes;
+- concurrent policies with owned cleanup.
+
+Two checks are specific to OpenCode:
+- **Bash tool through the relay.** A real `opencode run` used the synthetic OpenAI-compatible Chat Completions fixture (`@ai-sdk/openai-compatible`, CA trust enabled) through the relay. Its `bash` tool wrote the sentinel in both state modes.
+- **OpenTUI in a PTY.** OpenTUI started under the guard in offline mode and exited with status 0 after Ctrl+C.
+
+After the runs, no container, volume or test image labeled for `io.opencode-container` remained. The pre-existing containers of other projects were not touched.
+
+Not run:
+- a concurrent restricted session of a sibling wrapper (the suite covers two concurrent OpenCode policies with distinct ownership);
+- the operator-run authenticated checks for `anthropic-api`, `openai-api`, `openrouter-api` and `opencode-zen` (a real request, streaming, a long-lived request and OpenTUI with each key). They are unavailable until the operator runs them, so no profile is declared verified.
+
+### Static checks
+
+| Check | Result |
+| --- | --- |
+| `bash -n opencode-container.sh opencode-wrapper` | Passed |
+| ShellCheck (`koalaman/shellcheck:stable`) on the wrapper and `tests/run-runtime.sh` | No findings |
+| markdownlint (`davidanson/markdownlint-cli2:v0.17.2`) | Only line-length (MD013) and list-spacing (MD032) findings, the same classes as the existing documents |
+| `openspec validate add-network-egress --strict` | Valid |
+| `git diff --check` | Clean |
+
+Known limitations, unchanged:
+- **Lifetime notice.** It compares whole seconds, so it can be missing when a lifetime-limited session ends just past the limit.
+- **Test runner stdin.** `tests/run-runtime.sh` passes `--interactive`, so suites that inherit stdin need it closed: run the runner with `</dev/null`, or give the calls explicit input, as `test_deprecated_shim` now does.

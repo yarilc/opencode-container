@@ -60,3 +60,14 @@ Delegation MUST NOT add SELinux label disabling, automatic relabeling, privilege
 - **WHEN** enabled delegation is denied by host permissions or SELinux policy
 - **THEN** the failure is reported with explicit host-policy remediation guidance
 - **AND** the wrapper does not weaken policy or retry with relaxed confinement
+
+### Requirement: Delegation only in unrestricted mode
+`OPENCODE_CONTAINER_PODMAN=1` SHALL be accepted only with explicit `OPENCODE_CONTAINER_NETWORK=unrestricted`. In offline and provider modes it SHALL fail before image or resource operations, explaining that the host API bypasses egress enforcement. Shell, YOLO and native permission settings SHALL NOT change this.
+
+#### Scenario: Delegation requested in a restricted mode
+- **WHEN** the wrapper starts in offline or provider mode with `OPENCODE_CONTAINER_PODMAN=1`, in OpenCode or shell mode, with or without YOLO
+- **THEN** it exits nonzero before image or resource operations and names explicit unrestricted mode as the only mode with delegation
+
+#### Scenario: Delegation in unrestricted mode
+- **WHEN** the wrapper starts in unrestricted mode with `OPENCODE_CONTAINER_PODMAN=1`
+- **THEN** delegation behaves as before this change

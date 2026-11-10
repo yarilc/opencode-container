@@ -580,3 +580,18 @@ its setup is unchanged. The changed shared files are copied unchanged and
 | --- | --- |
 | `--shared` (includes `test_reference_copy.py`) | Passed: 144 tests, 27 skipped (run by the modes) |
 | `--setup` | Passed: 64 tests |
+
+## Adoption of `sandbox-ref-9`: 2026-11-10
+
+`claude-container` tag `sandbox-ref-9` (commit `8b191e5`) lets an account method
+declare empty `login_args`, so setup can offer sign-in inside the interactive
+agent (needed by Antigravity, whose CLI has no login command). The changed
+shared files `network/agent_profile.py`, `setup/setup.py`,
+`tests/test_agent_profile.py` and `tests/test_setup.py` were copied unchanged;
+the `tests/test_reference_copy.py` manifest moved to the tag. This profile is
+unaffected: its methods keep their current setup behavior.
+
+| Check | Result |
+| --- | --- |
+| `bash tests/run-runtime.sh --shared` | Passed: 145 tests, 27 skipped (run by the modes) |
+| `bash tests/run-runtime.sh --setup` | Passed: 65 tests |

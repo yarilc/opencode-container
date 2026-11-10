@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE_TAG = 'sandbox-ref-7'
-REFERENCE_COMMIT = 'd52a031ae5f296991d0e3b53e6e61a706b19fa35'
+REFERENCE_TAG = 'sandbox-ref-8'
+REFERENCE_COMMIT = '12cffab0d248ec48a95f3b1840c573fcebdbb427'
 SIBLING = ROOT.parent / 'claude-container'
 # Shared directories whose complete file set is fixed by the manifest.
 CLOSED_DIRECTORIES = ('network', 'setup')
@@ -74,7 +74,7 @@ MANIFEST = {
     'tests/test_platform.py': 'e5e30cbb9edb3561e0a6cac67641ab27986ce9e6bd425e5be96976c39fb5fecf',
     'tests/test_qualification.py': 'de1ef6d16975d1ab8939918ea2885f8d209f4ecc96fba8c28aaff44daf42c55d',
     'tests/test_session.py': 'f3b01c9965ee9785d6c910537485faa8cd3a11402b79b0cbb1401b1372e4df28',
-    'tests/test_setup.py': 'e84cfb7ced085c453c3fc3ee39351defee60b2d481f0c704e8d2f2e54c923e27',
+    'tests/test_setup.py': '6e6c93570ab11a4d76cef80f5783ee78aea67345feced74c3f54f5e34b27adaf',
     'tests/test_tls_client_hello.py': '7d8f889af0c4a8f6d40038bdbda915f3afa3adc08c47b5506a02180b595b7ccc',
     'tests/test_tls_proxy.py': '77f9dda900a8ee28ef76d018d862bd0475193f5b90840fd29005a04fe4403e83',
     'tests/tls_binding_fixture.py': '062fe63ec1fc8ad399199a5f5823515070d5d1fa4ac62607f8722a61347f3331',

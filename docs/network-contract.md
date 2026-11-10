@@ -139,10 +139,10 @@ The same OpenCode row appears in `claude-container` and `codex-container`.
 | Wrapper | Contract adoption | Implementation | Real enforcement | Auth compatibility |
 | --- | --- | --- | --- | --- |
 | Claude | Reference (`sandbox-ref-8`) | Mandatory bootstrap, multiplexed proxy and guided setup integrated | See the Claude validation record | Account login, reuse and refresh passed; real-key API unavailable |
-| Codex | Ported from `sandbox-ref-5`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-09) | Pending operator device-code login, refresh and API-key checks; synthetic Responses API streaming and tool call passed |
+| Codex | Ported from `sandbox-ref-8`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-09) | Pending operator device-code login, refresh and API-key checks; synthetic Responses API streaming and tool call passed |
 | Antigravity | Pending (profile-based port planned) | Not assessed | Not assessed | Not assessed |
 | OpenCode | Ported from `sandbox-ref-8`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Pending operator API-key checks for the four profiles; synthetic Chat Completions streaming and tool call passed |
-| Pi | Pending (profile-based port planned) | Not assessed | Not assessed | Not assessed |
+| Pi | Ported from `sandbox-ref-8`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Pending operator API-key checks for the four profiles; synthetic Chat Completions streaming and tool call passed |
 
 ## Port status
 

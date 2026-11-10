@@ -554,3 +554,18 @@ tag.
 | `--shared` (includes `test_reference_copy.py`) | Passed: 143 tests, 27 skipped (run by the modes) |
 | `--setup` | Passed: 63 tests |
 | `--qualification` | Passed: 18 tests |
+
+## Adoption of `sandbox-ref-7`: 2026-11-10
+
+`claude-container` `sandbox-ref-7` (commit `d52a031`) adds the optional profile
+field `install.runtime_build`. With `wrapper`, setup builds the runtime image
+through the installed wrapper's build-only `--container-build`; the default
+`recipe` keeps the direct `podman build`. This repository declares nothing, so
+its setup is unchanged. The changed shared files are copied unchanged and
+`tests/test_reference_copy.py` moves to the tag.
+
+| Check | Result |
+| --- | --- |
+| `--shared` (includes `test_reference_copy.py`) | Passed: 144 tests, 27 skipped (run by the modes) |
+| `--setup` | Passed: 64 tests |
+| `--qualification` | Passed: 18 tests |

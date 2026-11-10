@@ -18,7 +18,7 @@
 `test_tls_client_hello.py`, `test_tls_proxy.py`, `test_platform.py`,
 `test_qualification.py`, `test_guard.py`, `test_session.py`,
 `test_network_feasibility.py` and their fixtures) are copied unchanged from
-`claude-container` at tag `sandbox-ref-5`. Never edit them here, and never add
+`claude-container` at tag `sandbox-ref-6`. Never edit them here, and never add
 an agent identifier (`opencode`, `anthropic`, `openai`, `openrouter`) to them.
 Fix a defect in `claude-container` first, then copy the files again and update
 the manifest in `tests/test_reference_copy.py`. OpenCode values come only from:

@@ -3,8 +3,11 @@
 `opencode-container.sh` runs OpenCode in a rootless Podman container while
 preserving the workspace and OpenCode configuration between sessions. The
 image filesystem is read-only, with a writable workspace, private OpenCode XDG
-state and explicit temporary storage. Set `OPENCODE_CONTAINER_PODMAN=1` to
-expose the host Podman socket for container work inside the session.
+state and explicit temporary storage. Every launch selects a network mode:
+`offline`, `provider` (only the exact hosts of one provider profile) or
+`unrestricted`; see [Network modes](#network-modes). In unrestricted mode,
+`OPENCODE_CONTAINER_PODMAN=1` exposes the host Podman socket for container work
+inside the session.
 
 ## Enable rootless Podman on the host
 
@@ -86,11 +89,14 @@ opencode --version
 opencode run "Describe this project"
 ```
 
-The first invocation builds the image. Wrapper options:
+Every launch needs `OPENCODE_CONTAINER_NETWORK` (see [Network modes](#network-modes)).
+Building the image, including the first build, needs exact
+`OPENCODE_CONTAINER_MAINTENANCE=1`. Wrapper options:
 
 | Option | Effect |
 | --- | --- |
-| `--container-build` | rebuild the image from the pinned inputs, then start the selected session |
+| `--container-qualify` | qualify a prepared restricted installation with fixed local controls; must be used alone |
+| `--container-build` | rebuild the image from the pinned inputs (requires `OPENCODE_CONTAINER_MAINTENANCE=1`), then start the selected session |
 | `--container-shell` | bypass the OpenCode entrypoint and open `/bin/bash`, omitting all OpenCode arguments |
 | `--container-git-worktree` | expose the physical current directory's entire immediate parent read/write, retaining the original physical working directory and naming basename |
 | `--container-help` | wrapper help without engine or state side effects |
@@ -105,7 +111,9 @@ bounded session cleanup.
 `localhost/opencode-cli:latest`). One generic image serves every user: the
 numeric identity is set at launch with `--userns=keep-id --user UID:GID`, and the
 image contains no user name, UID, GID or entrypoint script. A missing image is
-built automatically on first launch.
+built on launch only with exact `OPENCODE_CONTAINER_MAINTENANCE=1`; without it
+the wrapper stops before any build or pull. Restricted launches run the
+immutable image ID resolved at launch.
 
 OpenCode and OpenSpec versions are pinned in `Containerfile` (see
 [Updating pinned image inputs](#updating-pinned-image-inputs)).
@@ -218,6 +226,142 @@ OpenRouter, AWS, Azure and GitHub variable.
 - Set `OPENCODE_CONTAINER_AGENTS_DIR=1` or `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`
   to keep the other integrations.
 
+## Network modes
+
+`OPENCODE_CONTAINER_NETWORK` is required for every launch; an unset or empty
+value stops before any engine call or state change. Unknown values fail before
+image operations, and a failed restricted launch never retries with
+unrestricted networking.
+
+| Mode | Agent network | Podman delegation |
+| --- | --- | --- |
+| `offline` | Own loopback, pipes and connected socket pairs only; no model provider is reachable | Rejected |
+| `provider` | As offline, plus the exact HTTPS hosts of one protected provider profile through an external proxy | Rejected |
+| `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
+
+The restricted implementation is shared with `claude-container` and copied
+unchanged from its tag `sandbox-ref-3`; see
+[docs/network-contract.md](docs/network-contract.md) and
+[network/README.md](network/README.md).
+
+### Migration
+
+Existing invocations stop until a mode is set. To keep the previous behavior:
+
+```bash
+export OPENCODE_CONTAINER_NETWORK=unrestricted
+OPENCODE_CONTAINER_MAINTENANCE=1 ./opencode-container.sh --container-build --version
+```
+
+Shared state now always uses the fixed paths under `$HOME` (see
+[Mounts and security](#mounts-and-security)). If you kept OpenCode state under
+a custom `XDG_*_HOME`, move it there, or select it with
+`OPENCODE_CONTAINER_CONFIG_DIR` (configuration only) or
+`OPENCODE_CONTAINER_STATE_DIR` (an isolated home).
+
+### Restricted prerequisites and qualification
+
+Offline and provider modes require:
+- host Python 3;
+- a same-host Unix rootless Podman >= 4.9 service with Netavark;
+- the standard OCI seccomp profile and usable Landlock ABI >= 3;
+- a protected installation outside writable workspace and state trees;
+- the static guard and its SHA-256 manifest in `network/bin`;
+- a current local qualification report.
+
+Run `--container-qualify` alone after preparation or relevant updates:
+
+```bash
+OPENCODE_CONTAINER_NETWORK=offline ./opencode-container.sh --container-qualify
+```
+
+Qualification is bound to the boot, engine, security policy, code, images,
+policy, profile, CA trust and hardening settings. A reboot therefore requires
+requalification. An active SELinux or AppArmor policy that cannot be identified
+forces the full gate on every launch. The shipped release acceptance inventory
+is empty, so installations report `locally-qualified`, never `release-measured`.
+
+Restricted sessions receive no host proxy or CA variables. The relay sets the
+proxy, and `NO_PROXY=localhost,127.0.0.1,::1` keeps OpenTUI's connection to its
+local OpenCode server direct. Named Unix sockets, host services and LSP or
+plugin downloads are unavailable. `opencode run`, its tools and the TUI were
+verified under the guard; see [the validation record](docs/validation.md).
+
+### Provider mode
+
+Provider mode needs:
+- `OPENCODE_CONTAINER_NETWORK_PROFILE`;
+- `OPENCODE_CONTAINER_NETWORK_POLICY`, a protected absolute policy path, normally
+  `agent/policies/default.json` of the installation;
+- `OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR`, a private native directory at its
+  host path;
+- `OPENCODE_CONTAINER_EGRESS_IMAGE`, the immutable proxy image ID or registry
+  digest.
+
+| Profile | Allowed host | Forwarded key |
+| --- | --- | --- |
+| `anthropic-api` | `api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `openai-api` | `api.openai.com` | `OPENAI_API_KEY` |
+| `openrouter-api` | `openrouter.ai` | `OPENROUTER_API_KEY` |
+| `opencode-zen` | `opencode.ai` (OpenCode Zen) | `OPENCODE_API_KEY` |
+
+The profile selects the only forwarded credential.
+`OPENCODE_CONTAINER_PROVIDER` must be unset, `none` or the matching provider,
+and `OPENAI_BASE_URL` is never forwarded. Offline sessions forward no provider
+variable. Use API keys: from the environment, or stored with
+`opencode auth login`. Browser-callback and OAuth logins, cloud providers,
+custom `baseURL` values and local model servers have no profile.
+
+Restricted sessions set `OPENCODE_DISABLE_AUTOUPDATE`,
+`OPENCODE_DISABLE_DEFAULT_PLUGINS`, `OPENCODE_DISABLE_LSP_DOWNLOAD`,
+`OPENCODE_DISABLE_MODELS_FETCH` and `OPENCODE_DISABLE_SHARE` to `1` after
+forwarding. Writable configuration cannot re-enable these features. The
+bundled model catalog stays available. The background install of
+`@opencode-ai/plugin` has no control: the proxy denies it, and OpenCode only
+logs a warning.
+
+Limits:
+- **Residual exfiltration.** The proxy binds the CONNECT host to the TLS server
+  name of the initial and retried ClientHello. It cannot tell your credentials
+  from an attacker's. An injected agent can therefore send workspace data to
+  the allowed host (`api.anthropic.com`, `api.openai.com`, `openrouter.ai` or
+  `opencode.ai`) with a foreign key or account. Only offline removes this
+  channel.
+- **Opaque application routing.** Matching SNI does not prove exclusive
+  communication with your account. TLS 1.2 renegotiation is not inspected.
+- **Hosted tools.** Provider-hosted tools such as web search run at the
+  provider, outside this boundary.
+- **Maintenance traffic.** Image pulls and build `RUN` steps happen outside
+  runtime filtering.
+
+### Operator build inputs
+
+Until guided setup arrives (`add-container-setup`), prepare the artifacts
+manually, under maintenance authorization:
+
+```bash
+export OPENCODE_CONTAINER_MAINTENANCE=1
+tag=$(python3 -I network/agent_profile.py image toolchain development)
+podman build --pull=never --tag "$tag" --file network/guard-build.Containerfile network
+bash network/build-guard.sh "$PWD/network/bin"   # a protected native directory
+podman build --pull=never --tag localhost/opencode-egress:local --file network/Containerfile network
+podman image inspect --format '{{.Id}}' localhost/opencode-egress:local
+```
+
+The installation, including `network/bin`, must be on native Linux storage
+outside writable workspace and state trees.
+
+### Host CA trust
+
+`OPENCODE_CONTAINER_TRUST_HOST_CA=1` (or `true`/`yes`) mounts one bundle
+read-only at `/opencode-home/ca/bundle.pem`. The bundle is
+`OPENCODE_CONTAINER_CA_BUNDLE`, or the first of
+`/etc/ssl/certs/ca-certificates.crt` and `/etc/pki/tls/certs/ca-bundle.crt`.
+The wrapper sets `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and
+`NODE_EXTRA_CA_CERTS` to it. OpenCode's Bun runtime honors
+`NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE`. Any other value fails before engine
+calls.
+
 ## Mounts and security
 
 Sessions use the dedicated home `HOME=/opencode-home`, with
@@ -230,33 +374,37 @@ host OpenCode XDG directories are mounted read/write below it:
 
 | Host source | Session path |
 | --- | --- |
-| `$XDG_CONFIG_HOME/opencode` | `/opencode-home/.config/opencode` |
-| `$XDG_DATA_HOME/opencode` | `/opencode-home/.local/share/opencode` |
-| `$XDG_CACHE_HOME/opencode` | `/opencode-home/.cache/opencode` |
-| `$XDG_STATE_HOME/opencode` | `/opencode-home/.local/state/opencode` |
+| `$HOME/.config/opencode`, or `OPENCODE_CONTAINER_CONFIG_DIR` | `/opencode-home/.config/opencode` |
+| `$HOME/.local/share/opencode` | `/opencode-home/.local/share/opencode` |
+| `$HOME/.cache/opencode` | `/opencode-home/.cache/opencode` |
+| `$HOME/.local/state/opencode` | `/opencode-home/.local/state/opencode` |
 
-Unset/empty host XDG bases default to `$HOME/.config`, `$HOME/.local/share`,
-`$HOME/.cache`, and `$HOME/.local/state`. HOME and nonempty XDG bases must be
-absolute. Other files written below `/opencode-home` do not survive the session.
+The host paths are fixed below `$HOME`; host `XDG_*_HOME` variables do not
+relocate them. This matches the state model of the shared sandbox code, which
+checks one configuration directory plus fixed directories below `$HOME`.
+`OPENCODE_CONTAINER_CONFIG_DIR`, a private absolute directory, replaces only the
+configuration directory. HOME and the override must be absolute. Other files
+written below `/opencode-home` do not survive the session.
 
 Missing state directories are created privately with a scoped umask. Every
 resolved state directory must belong to the caller, permit read/write/traverse,
 and deny all group/other permissions. Existing insecure directories cause a
 preflight failure before image operations: the wrapper never chmods/chowns them
 or imports credentials. Correct permissions manually or select private native
-Linux storage when WSL/DrvFS does not enforce Unix modes. Symlinked host XDG
-bases and differently named symlink targets are resolved physically before they
-are mounted at the fixed session paths. Conflicting mount destinations are
+Linux storage when WSL/DrvFS does not enforce Unix modes. Symlinked state
+directories and differently named symlink targets are resolved physically before
+they are mounted at the fixed session paths. Conflicting mount destinations are
 rejected.
 
 ### Isolated state
 
-`OPENCODE_CONTAINER_STATE_DIR=/absolute/path` replaces the shared host XDG state
-for that launch: the directory becomes the persistent `/opencode-home`, and the
+`OPENCODE_CONTAINER_STATE_DIR=/absolute/path` replaces the shared host state
+for that launch (an empty value selects shared state, like an unset one); it
+conflicts with a nonempty `OPENCODE_CONTAINER_CONFIG_DIR`: the directory becomes the persistent `/opencode-home`, and the
 four OpenCode directories are created inside it. The wrapper creates it
 privately when missing and validates it with the same ownership and mode rules,
 before any engine query. It must not equal, contain or lie inside the
-workspace mount. The host XDG OpenCode directories are not mounted in this mode,
+workspace mount. The shared host OpenCode directories are not mounted in this mode,
 and no credentials are copied: authenticate again with `opencode auth login`.
 
 `$HOME/.agents` and `/etc/opencode` are optional read-only integrations,
@@ -358,9 +506,14 @@ image digest; `tests/test_image_pins.py` rejects floating inputs. To update:
    `OPENCODE_CONTAINER_PROVIDER` table if needed.
 3. Re-check how the new version merges `OPENCODE_PERMISSION` (YOLO) and parses
    flags such as `--auto`.
-4. Rebuild explicitly with `--container-build`.
-5. Rerun the credential-free and real-engine checks, including OpenTUI.
-6. Record the tested versions with the date in `docs/validation.md`.
+4. Re-measure the provider and optional-traffic hosts and the
+   `OPENCODE_DISABLE_*` controls, then update `agent/policies/default.json`
+   with a new revision and `tested.cli`; the pin test requires the two
+   versions to match.
+5. Rebuild explicitly with `OPENCODE_CONTAINER_MAINTENANCE=1` and
+   `--container-build`, then run `--container-qualify` again.
+6. Rerun the credential-free and real-engine checks, including OpenTUI.
+7. Record the tested versions with the date in `docs/validation.md`.
 
 Do not run `opencode upgrade` inside the container: the main filesystem is
 immutable and automatic updates are disabled.
@@ -405,17 +558,22 @@ and filesystem socket fixtures; they do not contact the real engine.
 Real rootless acceptance requires the built image and a running rootless
 Unix service. `tests/run-runtime.sh` runs the tests through Podman, mounting the
 workspace at its host absolute path and a disposable private Linux state volume.
-It defaults to the neighboring project's `localhost/claude-code:latest` as a
-tooling image because the OpenCode production image intentionally lacks Python.
-Override `OPENCODE_TEST_TOOLS_IMAGE` with an available Linux image providing
-Python 3.11+, Bash, GNU coreutils timeout, Git, Podman remote, and a passwd entry
-for the invoking numeric UID/GID. The runner never imports host
-application credentials or changes service/policy setup.
+Its tooling image defaults to the OpenCode image itself, which provides Python
+3, Bash, GNU coreutils timeout, Git and Podman remote; `OPENCODE_TEST_TOOLS_IMAGE`
+selects another one. The runner never imports host application credentials or
+changes service/policy setup.
 
 ```bash
-./opencode-container.sh --container-build --version
-./tests/run-runtime.sh
+OPENCODE_CONTAINER_NETWORK=unrestricted OPENCODE_CONTAINER_MAINTENANCE=1 ./opencode-container.sh --container-build --version
+bash tests/run-runtime.sh                  # unrestricted runtime suite
+bash tests/run-runtime.sh --wrapper        # wrapper contracts with a fake engine
+bash tests/run-runtime.sh --shared         # shared suites copied from claude-container
+bash tests/run-runtime.sh --network        # restricted modes with real rootless Podman
+bash tests/run-runtime.sh --guard          # guard runtime fixtures (needs the toolchain image)
 ```
+
+Further modes: `--qualification`, `--network-feasibility`, `--network-policy`,
+`--mux` and `--guard-idle` (the 305-second idle check).
 
 The real suite exercises mount flags/capacities/lifetime, identity, state,
 context filtering, concurrency, signals, stdin, worktrees, delegation and

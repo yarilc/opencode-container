@@ -1,5 +1,8 @@
-# Only deliberate root image inputs are sent to Podman; the image needs no
-# local COPY/ADD inputs.
+# Admit only explicit runtime build inputs.
 **
 !/Containerfile
 !/.containerignore
+!/network
+/network/**
+!/network/relay.py
+!/network/mux.py

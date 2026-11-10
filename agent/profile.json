@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "name": "opencode-container",
+  "display_name": "OpenCode",
+  "wrapper": "opencode-container.sh",
+  "env_prefix": "OPENCODE_CONTAINER",
+  "label_namespace": "io.opencode-container",
+  "identifiers": ["opencode", "anthropic", "openai", "openrouter"],
+  "images": {
+    "agent": "localhost/opencode-cli",
+    "proxy": "localhost/opencode-egress",
+    "toolchain": "localhost/opencode-guard-toolchain"
+  },
+  "install": {
+    "state_name": "opencode-egress"
+  },
+  "native": {
+    "home": "/opencode-home",
+    "command": "opencode",
+    "config_dir_env": "OPENCODE_CONTAINER_CONFIG_DIR",
+    "approval_bypass_env": "OPENCODE_CONTAINER_YOLO",
+    "config_home": ".config/opencode",
+    "shared_dirs": [".local/share/opencode", ".cache/opencode", ".local/state/opencode"]
+  },
+  "auth": {
+    "anthropic": {
+      "description": "uses an Anthropic API key supplied at launch",
+      "policy_profile": "anthropic-api",
+      "hosts": ["api.anthropic.com"],
+      "credential_env": "ANTHROPIC_API_KEY"
+    },
+    "openai": {
+      "description": "uses an OpenAI API key supplied at launch",
+      "policy_profile": "openai-api",
+      "hosts": ["api.openai.com"],
+      "credential_env": "OPENAI_API_KEY"
+    },
+    "openrouter": {
+      "description": "uses an OpenRouter API key supplied at launch",
+      "policy_profile": "openrouter-api",
+      "hosts": ["openrouter.ai"],
+      "credential_env": "OPENROUTER_API_KEY"
+    },
+    "opencode-zen": {
+      "description": "uses an OpenCode Zen API key supplied at launch",
+      "policy_profile": "opencode-zen",
+      "hosts": ["opencode.ai"],
+      "credential_env": "OPENCODE_API_KEY"
+    }
+  }
+}

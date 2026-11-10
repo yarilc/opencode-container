@@ -3,6 +3,7 @@ import json
 import itertools
 import os
 from pathlib import Path
+import shutil
 import socket
 import signal
 import time
@@ -26,7 +27,35 @@ def publish_cid():
     if '--cidfile' in args and not os.environ.get('FAKE_MISSING_CID'):
         pathlib.Path(args[args.index('--cidfile') + 1]).write_text(os.environ.get('FAKE_CID', 'a' * 64) + '\n')
 
-if args[:2] == ['--remote', '--url']:
+proxy = 'b' * 64
+if args[0] in os.environ.get('FAKE_STALL', '').split(','):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    pathlib.Path(os.environ['FAKE_LOG'] + '.stalled-' + args[0]).write_text(str(os.getpid()))
+    while True: time.sleep(0.05)
+# Restricted-mode engine responses (platform, proxy image and proxy container).
+if args[0] == 'info' and args[-1] == '{{json .Host}}':
+    print(json.dumps({'kernel': '6.6.87.2-microsoft-standard-WSL2', 'arch': 'amd64',
+        'security': {'seccompEnabled': True, 'selinuxEnabled': False, 'apparmorEnabled': False}}))
+elif args[0] == 'info' and args[-1] == '{{.Host.NetworkBackend}}':
+    print(os.environ.get('FAKE_BACKEND', 'netavark'))
+elif args[0] == 'version':
+    print(os.environ.get('FAKE_SERVER_VERSION', '4.9.3'))
+elif args[:2] == ['image', 'inspect']:
+    print(os.environ.get('FAKE_IMAGE_ID', 'd' * 64))
+elif args[:2] == ['image', 'exists'] and args[-1] == os.environ.get('FAKE_EGRESS_IMAGE', '-'):
+    sys.exit(int(os.environ.get('FAKE_EGRESS_STATUS', '0')))
+elif args[0] == 'pull':
+    sys.exit(0)
+elif args[0] == 'create' and any(a.startswith('io.opencode-container.egress=') for a in args):
+    pathlib.Path(args[args.index('--cidfile') + 1]).write_text(proxy + '\n')
+    print(proxy)
+elif args[0] == 'inspect' and args[-1] == proxy:
+    print(os.environ.get('FAKE_PROXY_CONFIG', '{"PidsLimit":128,"Memory":268435456}'))
+elif args[0] == 'exec' and args[1] == proxy:
+    print(os.environ.get('FAKE_PROXY_EFFECTIVE', '{"pids":128,"memory":268435456,"capabilities":[0,0,0,0,0],"no_new_privs":1,"seccomp":2}'))
+elif args[0] in ('start', 'rm') and args[-1] == proxy:
+    sys.exit(0)
+elif args[:2] == ['--remote', '--url']:
     default = os.environ.get('FAKE_SOCKET_ROOTLESS', 'true') + '\n' + args[2][len('unix://'):]
     print(os.environ.get('FAKE_SOCKET_INFO', default))
     sys.exit(int(os.environ.get('FAKE_SOCKET_STATUS', '0')))
@@ -145,7 +174,8 @@ class WrapperTests(unittest.TestCase):
         self.env = {'PATH': os.environ['PATH'], 'LANG': 'C.UTF-8'}
         self.env.update(PATH=str(self.bin) + ':' + self.env['PATH'],
                         FAKE_LOG=str(self.log), TMPDIR=str(self.diagnostics),
-                        HOME=str(self.base / "home"))
+                        HOME=str(self.base / "home"),
+                        OPENCODE_CONTAINER_NETWORK='unrestricted', OPENCODE_CONTAINER_MAINTENANCE='1')
         self.socket = socket.socket(socket.AF_UNIX)
         self.socket_path = self.base / 'podman.sock'
         self.socket.bind(str(self.socket_path))
@@ -153,7 +183,7 @@ class WrapperTests(unittest.TestCase):
         self.env['OPENCODE_CONTAINER_PODMAN_SOCKET'] = str(self.socket_path)
 
     def run_wrapper(self, *args, cwd=None, mask=None, **env):
-        return subprocess.run([str(WRAPPER), *args], cwd=cwd or self.project,
+        return subprocess.run([str(getattr(self, 'wrapper', WRAPPER)), *args], cwd=cwd or self.project,
                               env=self.env | env, input='input payload',
                               text=True, capture_output=True, timeout=10,
                               **({'umask': mask} if mask is not None else {}))
@@ -307,44 +337,72 @@ class WrapperTests(unittest.TestCase):
                     self.assertEqual(path.stat().st_mode & 0o777, mode)
                 finally:
                     path.chmod(0o700)
-        for variable in ('HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME'):
+        for variable in ('HOME', 'OPENCODE_CONTAINER_CONFIG_DIR'):
             self.log.unlink(missing_ok=True)
             self.assertNotEqual(self.run_wrapper(**{variable:'relative'}).returncode, 0)
             self.assert_no_images()
         stat = self.bin/'stat'
         stat.write_text('#!/bin/bash\nif [[ "$2" == %u ]]; then echo 99999; else exec /usr/bin/stat "$@"; fi\n')
         stat.chmod(0o755)
-        self.log.unlink()
+        self.log.unlink(missing_ok=True)
         self.assertNotEqual(self.run_wrapper().returncode, 0)
         self.assert_no_images()
 
     def test_state_files_broken_links_and_resolution(self):
         for kind in ('file','link'):
-            path=self.base/('xdg-'+kind); path.mkdir()
-            if kind=='file': (path/'opencode').touch()
-            else: (path/'opencode').symlink_to(path/'missing')
+            path=self.base/('config-'+kind)
+            if kind=='file': path.touch()
+            else: path.symlink_to(self.base/'missing')
             self.log.unlink(missing_ok=True)
-            self.assertNotEqual(self.run_wrapper(XDG_CONFIG_HOME=str(path)).returncode, 0)
+            self.assertNotEqual(self.run_wrapper(OPENCODE_CONTAINER_CONFIG_DIR=str(path)).returncode, 0)
             self.assert_no_images()
         target=self.base/'physical'; target.mkdir(mode=0o700)
-        alias=self.base/'xdg-alias'; alias.symlink_to(target)
+        alias=self.base/'config-alias'; alias.symlink_to(target)
         self.log.unlink(missing_ok=True)
-        result=self.run_wrapper(XDG_CONFIG_HOME=str(alias))
+        result=self.run_wrapper(OPENCODE_CONTAINER_CONFIG_DIR=str(alias))
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn(f'{target}/opencode:/opencode-home/.config/opencode:rw',self.create())
-        appbase=self.base/'appbase'; appbase.mkdir()
+        self.assertIn(f'{target}:/opencode-home/.config/opencode:rw',self.create())
+        home=self.base/'home'
+        self.assertIn(f'{home}/.local/share/opencode:/opencode-home/.local/share/opencode:rw',self.create())
+        self.assertFalse((home/'.config/opencode').exists())
+        appbase=self.base/'appbase'; (appbase/'.config').mkdir(parents=True)
         renamed=self.base/'elsewhere'/'renamed'; renamed.mkdir(parents=True,mode=0o700)
-        (appbase/'opencode').symlink_to(renamed)
+        (appbase/'.config/opencode').symlink_to(renamed)
         self.log.unlink()
-        result=self.run_wrapper(XDG_CONFIG_HOME=str(appbase))
+        result=self.run_wrapper(HOME=str(appbase))
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn(f'{renamed}:/opencode-home/.config/opencode:rw',self.create())
         self.log.unlink()
         # Shared state below the workspace binds at its own fixed destination.
-        result=self.run_wrapper(XDG_CONFIG_HOME=str(self.project))
+        result=self.run_wrapper(OPENCODE_CONTAINER_CONFIG_DIR=str(self.project/'opencode'))
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn(f'{self.project}/opencode:/opencode-home/.config/opencode:rw',self.create())
         (self.project/'opencode').rmdir()
+
+    def test_host_xdg_variables_do_not_relocate_state(self):
+        relocated=self.base/'srv'
+        result=self.run_wrapper(**{v: str(relocated/v.lower()) for v in
+                                   ('XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME')})
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertFalse(relocated.exists())
+        home=self.base/'home'
+        create=self.create()
+        for relative in ('.config/opencode','.local/share/opencode','.cache/opencode','.local/state/opencode'):
+            self.assertIn(f'{home}/{relative}:/opencode-home/{relative}:rw',create)
+        for value in ('XDG_CONFIG_HOME=/opencode-home/.config','XDG_DATA_HOME=/opencode-home/.local/share'):
+            self.assertIn(value,create)
+
+    def test_config_override_conflicts_with_isolated_state(self):
+        for flags in ((),('--container-shell',)):
+            with self.subTest(flags=flags):
+                self.log.unlink(missing_ok=True)
+                result=self.run_wrapper(*flags,OPENCODE_CONTAINER_CONFIG_DIR=str(self.base/'config'),
+                                        OPENCODE_CONTAINER_STATE_DIR=str(self.base/'isolated'))
+                self.assertEqual(result.returncode,1,result.stderr)
+                self.assertIn('OPENCODE_CONTAINER_STATE_DIR conflicts with OPENCODE_CONTAINER_CONFIG_DIR',result.stderr)
+                self.assertEqual(self.calls(),[])
+                self.assertFalse((self.base/'config').exists())
+                self.assertFalse((self.base/'isolated').exists())
 
     def test_mount_paths_and_boundaries(self):
         project=self.base/'parent, spaces'/'workspace, spaces'; project.mkdir(parents=True)
@@ -545,7 +603,7 @@ class WrapperTests(unittest.TestCase):
                 self.assertIn('stdin:input payload', result.stdout)
         self.log.unlink()
         result = subprocess.run([str(shim)], cwd=self.project, env=self.env | {'FAKE_EXIT': '125'},
-                                text=True, capture_output=True, timeout=10)
+                                input='', text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 125, result.stderr)
 
     def test_labels_use_common_namespace(self):
@@ -602,7 +660,7 @@ class WrapperTests(unittest.TestCase):
         volumes=[create[i+1] for i,v in enumerate(create) if v=='--volume']
         self.assertEqual(len(volumes),2)
         foreign=self.base/'shared'; foreign.mkdir(mode=0o755)
-        cases=('relative/state','',str(foreign),str(self.project),str(self.project/'state'),
+        cases=('relative/state',str(foreign),str(self.project),str(self.project/'state'),
                str(self.project.parent),'/bad:colon')
         for value in cases:
             with self.subTest(value=value):
@@ -612,6 +670,11 @@ class WrapperTests(unittest.TestCase):
                 self.assertIn('OPENCODE_CONTAINER_STATE_DIR' if value!=str(foreign) else 'must be private',result.stderr)
                 self.assertFalse(self.calls())
         self.assertFalse((self.project/'state').exists())
+        # An empty value selects shared state, like an unset one.
+        self.log.unlink(missing_ok=True)
+        result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR='')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('/opencode-home:rw,exec,nosuid,nodev,mode=1777,size=512m',self.create())
         self.assertEqual(foreign.stat().st_mode & 0o777,0o755)
 
     def test_budgets(self):
@@ -970,6 +1033,416 @@ class WrapperTests(unittest.TestCase):
         finally:
             os.close(master);os.close(slave)
 
+
+    # Restricted modes. Argument and lifecycle instrumentation only: the real
+    # guard, platform and protected-path acceptance live in the runtime suites.
+    def restricted_fixture(self):
+        install = self.base / 'install'
+        (install / 'network/bin').mkdir(parents=True)
+        self.wrapper = install / 'opencode-container.sh'
+        shutil.copyfile(WRAPPER, self.wrapper)
+        self.wrapper.chmod(0o755)
+        guard = install / 'network/bin/sandbox-egress-guard'
+        guard.write_text('#!/bin/sh\nexit 0\n')
+        guard.chmod(0o700)
+        (guard.parent / 'sandbox-egress-guard.sha256').write_text('c' * 64 + '  sandbox-egress-guard\n')
+        for name in ('network/session.py', 'network/agent_profile.py', 'network/policy.py', 'network/revisions.py',
+                     'network/platform_check.py', 'network/proxy_hardening.py', 'agent/profile.json'):
+            (install / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, install / name)
+        record = ("import json,os,pathlib,sys\n"
+                  "pathlib.Path(os.environ['FAKE_LOG']).open('a').write(json.dumps([pathlib.Path(sys.argv[0]).name,"
+                  " *sys.argv[1:], os.environ.get('OPENCODE_CONTAINER_IMAGE', '')]) + '\\n')\n")
+        (install / 'network/qualify.py').write_text(record + (
+            "if os.environ.get('FAKE_QUALIFY_STALL'):\n"
+            " import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            " pathlib.Path(os.environ['FAKE_LOG'] + '.stalled-qualify').touch()\n"
+            " time.sleep(60)\n"
+            "sys.exit(int(os.environ.get('FAKE_QUALIFY_STATUS', '0')))\n"))
+        (install / 'network/control.py').write_text(record + (
+            "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))\n"
+            "import socket\nfrom revisions import TLS_ENFORCEMENT\nargs=sys.argv[1:]\n"
+            "if args[0]=='preflight' and os.environ.get('FAKE_PREFLIGHT_FAILURE'):\n"
+            " print('opencode-container: network policy preflight failed: synthetic invalid policy', file=sys.stderr); sys.exit(1)\n"
+            "if args[0]=='snapshot':\n"
+            " p=pathlib.Path(args[args.index('--session')+1]); (p/'transport').mkdir(); (p/'config').mkdir(); (p/'logs').mkdir()\n"
+            " s=socket.socket(socket.AF_UNIX); s.bind(str(p/'transport/proxy.sock')); s.close()\n"
+            " (p/'transport/ready').write_text('fixture-policy guard='+'c'*64+' mux=1 tls='+TLS_ENFORCEMENT+'\\n')\n"
+            " print('fixture-policy')\n"))
+        runtime = self.base / 'runtime'
+        runtime.mkdir(mode=0o700, exist_ok=True)
+        return dict(FAKE_INFO='true linux true', CONTAINER_HOST='unix:///run/service.sock',
+                    OPENCODE_CONTAINER_NETWORK_POLICY=str(install / 'policy.json'),
+                    OPENCODE_CONTAINER_NETWORK_PROFILE='openai-api',
+                    OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR=str(runtime),
+                    OPENCODE_CONTAINER_EGRESS_IMAGE='e' * 64, FAKE_EGRESS_IMAGE='e' * 64)
+
+    def names(self):
+        return [Path(c[0]).name if c[0].endswith('.py') else c[0] for c in self.calls()]
+
+    def creates(self):
+        return [c for c in self.calls() if c[0] == 'create']
+
+    @staticmethod
+    def env_values(create):
+        return [create[i + 1] for i, a in enumerate(create[:-1]) if a == '--env']
+
+    def start_restricted(self, *args, **env):
+        process = subprocess.Popen(['bash', str(self.wrapper), *args], cwd=self.project,
+                                   env=self.env | env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        def stop():
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate(timeout=5)
+        self.addCleanup(stop)
+        return process
+
+    def wait_path(self, path, process, timeout=10):
+        deadline = time.monotonic() + timeout
+        while not path.exists():
+            self.assertIsNone(process.poll(), 'wrapper exited before fixture barrier')
+            self.assertLess(time.monotonic(), deadline, 'fixture barrier timed out')
+            time.sleep(0.01)
+
+    def test_missing_mode_stops_before_engine_state_and_other_checks(self):
+        options = ('--container-shell', '--container-build', '--container-git-worktree')
+        for enabled in itertools.product((False, True), repeat=3):
+            for mode in (None, ''):
+                with self.subTest(enabled=enabled, mode=mode):
+                    env = self.env | {'OPENCODE_CONTAINER_YOLO': 'invalid', 'OPENCODE_CONTAINER_TRUST_HOST_CA': 'invalid',
+                                      'OPENCODE_CONTAINER_PODMAN': '1', 'CONTAINER_HOST': 'invalid',
+                                      'OPENCODE_CONTAINER_PROVIDER': 'invalid',
+                                      'OPENCODE_CONTAINER_STATE_DIR': str(self.base / 'isolated'),
+                                      'OPENCODE_CONTAINER_MEMORY_LIMIT': 'invalid', 'PATH': ''}
+                    env.pop('OPENCODE_CONTAINER_NETWORK')
+                    if mode is not None:
+                        env['OPENCODE_CONTAINER_NETWORK'] = mode
+                    args = [option for option, use in zip(options, enabled) if use]
+                    self.log.unlink(missing_ok=True)
+                    result = subprocess.run(['/bin/bash', str(WRAPPER), *args, 'run', 'x'], cwd=self.project,
+                                            env=env, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('OPENCODE_CONTAINER_NETWORK is required', result.stderr)
+                    self.assertIn('offline, provider, or unrestricted', result.stderr)
+                    self.assertIn('unrestricted keeps the previous networking behavior', result.stderr)
+                    self.assertEqual(self.calls(), [])
+                    self.assertFalse((self.base / 'home').exists())
+                    self.assertFalse((self.base / 'isolated').exists())
+
+    def test_mode_and_delegation_rejections_precede_engine(self):
+        cases = (({'OPENCODE_CONTAINER_NETWORK': 'invalid'}, 'must be offline, provider, or unrestricted'),
+                 ({'OPENCODE_CONTAINER_NETWORK': 'Offline'}, 'must be offline, provider, or unrestricted'),
+                 ({'OPENCODE_CONTAINER_NETWORK': 'provider'}, 'requires OPENCODE_CONTAINER_NETWORK_PROFILE'),
+                 ({'OPENCODE_CONTAINER_NETWORK': 'offline', 'OPENCODE_CONTAINER_PODMAN': '1'},
+                  'rejects OPENCODE_CONTAINER_PODMAN=1'),
+                 ({'OPENCODE_CONTAINER_NETWORK': 'provider', 'OPENCODE_CONTAINER_PODMAN': '1'},
+                  'rejects OPENCODE_CONTAINER_PODMAN=1'),
+                 ({'OPENCODE_CONTAINER_STATE_DIR': str(self.base / 'isolated'),
+                   'OPENCODE_CONTAINER_CONFIG_DIR': str(self.base / 'config')},
+                  'OPENCODE_CONTAINER_STATE_DIR conflicts with OPENCODE_CONTAINER_CONFIG_DIR'))
+        for values, message in cases:
+            for flags in ((), ('--container-shell',), ('--container-build', '--container-git-worktree')):
+                for yolo in ('', '1'):
+                    with self.subTest(values=values, flags=flags, yolo=yolo):
+                        self.log.unlink(missing_ok=True)
+                        result = self.run_wrapper(*flags, OPENCODE_CONTAINER_YOLO=yolo, **values)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn(message, result.stderr)
+                        self.assertEqual(self.calls(), [])
+                        self.assertFalse((self.base / 'isolated').exists())
+        fixture = self.restricted_fixture()
+        for values in ({'FAKE_BACKEND': 'cni'}, {'FAKE_SERVER_VERSION': '4.8.0'}):
+            with self.subTest(values=values):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**(fixture | values | {'OPENCODE_CONTAINER_NETWORK': 'offline'}))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('ineligible restricted platform', result.stderr)
+                self.assertFalse(any(c[0] in ('image', 'build', 'create') for c in self.calls()))
+
+    def test_help_documents_modes_migration_and_provider_limits(self):
+        result = self.run_wrapper('--container-help', OPENCODE_CONTAINER_NETWORK='')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for text in ('--container-qualify', 'OPENCODE_CONTAINER_NETWORK ', 'OPENCODE_CONTAINER_NETWORK_PROFILE',
+                     'OPENCODE_CONTAINER_NETWORK_POLICY', 'OPENCODE_CONTAINER_NETWORK_RUNTIME_DIR',
+                     'OPENCODE_CONTAINER_EGRESS_IMAGE', 'OPENCODE_CONTAINER_MAINTENANCE',
+                     'OPENCODE_CONTAINER_CONFIG_DIR', 'OPENCODE_CONTAINER_TRUST_HOST_CA',
+                     'OPENCODE_CONTAINER_CA_BUNDLE',
+                     'OPENCODE_CONTAINER_NETWORK=unrestricted to keep the previous networking',
+                     'anthropic-api: api.anthropic.com', 'openai-api: api.openai.com',
+                     'openrouter-api: openrouter.ai', 'opencode-zen: opencode.ai', 'Only offline removes this',
+                     'NO_PROXY=localhost,127.0.0.1,::1', 'outside this boundary', 'host XDG_*_HOME'):
+            self.assertIn(text, result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_maintenance_gates_every_build(self):
+        for maintenance in ('', '0', 'true', 'yes', '01', ' 1'):
+            for explicit, status in ((True, '0'), (False, '1')):
+                with self.subTest(maintenance=maintenance, explicit=explicit):
+                    self.log.unlink(missing_ok=True)
+                    result = self.run_wrapper(*(['--container-build'] if explicit else []),
+                                              OPENCODE_CONTAINER_MAINTENANCE=maintenance, FAKE_IMAGE_STATUS=status)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('OPENCODE_CONTAINER_MAINTENANCE=1', result.stderr)
+                    self.assertFalse(any(c[0] in ('build', 'pull', 'create') for c in self.calls()))
+        self.log.unlink(missing_ok=True)
+        result = self.run_wrapper(OPENCODE_CONTAINER_MAINTENANCE='', FAKE_IMAGE_STATUS='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(c[0] == 'build' for c in self.calls()))
+        for explicit, status in ((True, '0'), (False, '1')):
+            self.log.unlink(missing_ok=True)
+            result = self.run_wrapper(*(['--container-build'] if explicit else []), FAKE_IMAGE_STATUS=status)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([c[0] for c in self.calls()].count('build'), 1)
+        self.log.unlink(missing_ok=True)
+        result = self.run_wrapper(FAKE_IMAGE_STATUS='125')
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertFalse(any(c[0] in ('build', 'create') for c in self.calls()))
+        fixture = self.restricted_fixture()
+        for mode in ('offline', 'provider'):
+            with self.subTest(mode=mode, preflight='invalid policy'):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper('--container-build', **(fixture | {
+                    'OPENCODE_CONTAINER_NETWORK': mode, 'FAKE_PREFLIGHT_FAILURE': '1'}))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('network policy preflight failed', result.stderr)
+                self.assertFalse(any(c[0] in ('image', 'build', 'pull', 'create') for c in self.calls()))
+
+    def test_proxy_image_acquisition_requires_maintenance_and_digest(self):
+        fixture = self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': 'provider', 'FAKE_EGRESS_STATUS': '1'}
+        digest = 'localhost/opencode-egress@sha256:' + 'e' * 64
+        for maintenance, image in (('', digest), ('1', 'e' * 64), ('1', 'localhost/opencode-egress:local')):
+            with self.subTest(maintenance=maintenance, image=image):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**(fixture | {'OPENCODE_CONTAINER_MAINTENANCE': maintenance,
+                                                       'OPENCODE_CONTAINER_EGRESS_IMAGE': image,
+                                                       'FAKE_EGRESS_IMAGE': image}))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('proxy image is absent', result.stderr)
+                self.assertFalse(any(c[0] in ('pull', 'create') for c in self.calls()))
+        self.log.unlink(missing_ok=True)
+        result = self.run_wrapper(**(fixture | {'OPENCODE_CONTAINER_EGRESS_IMAGE': digest, 'FAKE_EGRESS_IMAGE': digest}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['pull', digest], self.calls())
+
+    def test_host_ca_trust_modes(self):
+        bundle = self.base / 'bundle.pem'
+        bundle.write_text('synthetic certificate bundle')
+        variables = ('SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS')
+        for isolated in ('', str(self.base / 'isolated')):
+            for trust in ('', '0', 'no', '1', 'TrUe', 'yes'):
+                with self.subTest(isolated=isolated, trust=trust):
+                    self.log.unlink(missing_ok=True)
+                    state = {'OPENCODE_CONTAINER_STATE_DIR': isolated} if isolated else {}
+                    result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA=trust,
+                                              OPENCODE_CONTAINER_CA_BUNDLE=str(bundle), **state)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    create = self.create()
+                    enabled = trust.lower() in ('1', 'true', 'yes')
+                    self.assertEqual(f'{bundle}:/opencode-home/ca/bundle.pem:ro' in create, enabled)
+                    for variable in variables:
+                        self.assertEqual(f'{variable}=/opencode-home/ca/bundle.pem' in create, enabled)
+                    self.assertFalse(any('/etc/ssl/certs:' in a for a in create))
+                    if isolated and enabled:
+                        self.assertEqual((Path(isolated) / 'ca').stat().st_mode & 0o777, 0o700)
+        self.log.unlink(missing_ok=True)
+        result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA='maybe')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('OPENCODE_CONTAINER_TRUST_HOST_CA must be 0, 1, true, false, yes, or no', result.stderr)
+        self.assertEqual(self.calls(), [])
+        result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA='1', OPENCODE_CONTAINER_CA_BUNDLE='/missing/bundle.pem')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('OPENCODE_CONTAINER_CA_BUNDLE is not a file: /missing/bundle.pem', result.stderr)
+        self.assertFalse(any(c[0] in ('image', 'build', 'create') for c in self.calls()))
+        isolated = self.base / 'escape-home'
+        isolated.mkdir(mode=0o700)
+        (isolated / 'ca').symlink_to(self.base / 'escaped')
+        result = self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR=str(isolated), OPENCODE_CONTAINER_TRUST_HOST_CA='1',
+                                  OPENCODE_CONTAINER_CA_BUNDLE=str(bundle))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('escapes the state home', result.stderr)
+        self.assertFalse((self.base / 'escaped').exists())
+        self.wrapper = self.base / 'no-default-ca.sh'
+        self.wrapper.write_text(WRAPPER.read_text().replace(
+            'for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt',
+            'for candidate in /missing/one.crt /missing/two.crt'))
+        self.wrapper.chmod(0o755)
+        result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('no default CA bundle found', result.stderr)
+
+    def test_offline_order_arguments_and_status(self):
+        fixture = self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': 'offline',
+                                               'OPENAI_API_KEY': 'synthetic-not-a-real-key',
+                                               'OPENCODE_CONTAINER_PROVIDER': 'openai',
+                                               'HTTPS_PROXY': 'http://host-proxy:3128'}
+        for flags, yolo, tail in (((), '', ['/usr/local/bin/opencode', 'run', 'hello world']),
+                                  ((), '1', ['/usr/local/bin/opencode', 'run', 'hello world']),
+                                  (('--container-shell',), '1', ['/bin/bash'])):
+            with self.subTest(flags=flags, yolo=yolo):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(*flags, 'run', 'hello world', OPENCODE_CONTAINER_YOLO=yolo,
+                                          FAKE_EXIT='7', **fixture)
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertIn('network mode=offline', result.stderr)
+                order = [n for n in self.names() if n in ('control.py', 'image', 'qualify.py', 'ps', 'create', 'start')]
+                self.assertEqual(order, ['control.py', 'image', 'image', 'qualify.py', 'ps', 'create', 'start'])
+                preflight = next(c for c in self.calls() if c[0].endswith('control.py'))
+                for value in (str(self.project), '/opencode-home', str(self.base / 'home/.config/opencode'),
+                              str(self.base / 'home/.local/state/opencode')):
+                    self.assertIn(value, preflight)
+                qualify = next(c for c in self.calls() if c[0] == 'qualify.py')
+                self.assertEqual(qualify[1:], ['check', 'd' * 64])
+                create = self.create()
+                for value in ('--network=none', '--cap-drop=all', '--security-opt=no-new-privileges'):
+                    self.assertIn(value, create)
+                self.assertEqual(create[create.index('--entrypoint', create.index('--network=none')) + 1],
+                                 '/opt/sandbox-egress/guard')
+                self.assertNotIn('/bin/bash', create[:create.index('d' * 64)])
+                image = create.index('d' * 64)
+                self.assertEqual(create[image + 1:], ['--offline', '--', *tail])
+                for name in ('OPENAI_API_KEY', 'HTTPS_PROXY'):
+                    self.assertNotIn(name, self.env_values(create))
+                for flag in ('AUTOUPDATE', 'DEFAULT_PLUGINS', 'LSP_DOWNLOAD', 'MODELS_FETCH', 'SHARE'):
+                    self.assertIn(f'OPENCODE_DISABLE_{flag}=1', create)
+                self.assertEqual('OPENCODE_PERMISSION={"*":"allow"}' in create, yolo == '1')
+                self.assertFalse(any(c[0] in ('build', 'pull') for c in self.calls()))
+
+    def test_provider_order_credentials_and_protected_values(self):
+        keys = {'ANTHROPIC_API_KEY': 'k1', 'OPENAI_API_KEY': 'k2', 'OPENROUTER_API_KEY': 'k3',
+                'OPENCODE_API_KEY': 'k4', 'OPENAI_BASE_URL': 'https://elsewhere.invalid/v1',
+                'HTTPS_PROXY': 'http://host-proxy:3128', 'no_proxy': '*',
+                'OPENCODE_DISABLE_SHARE': '0', 'OPENCODE_DISABLE_MODELS_FETCH': ''}
+        fixture = self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': 'provider'} | keys
+        relay = ['/usr/bin/python3', '-I', '/opt/sandbox-egress/relay.py']
+        for profile, provider, credential in (('anthropic-api', '', 'ANTHROPIC_API_KEY'),
+                                              ('openai-api', 'openai', 'OPENAI_API_KEY'),
+                                              ('openrouter-api', 'none', 'OPENROUTER_API_KEY'),
+                                              ('opencode-zen', 'opencode', 'OPENCODE_API_KEY'),
+                                              ('custom-api', '', None)):
+            with self.subTest(profile=profile):
+                self.log.unlink(missing_ok=True)
+                values = fixture | {'FAKE_EXIT': '5', 'OPENCODE_CONTAINER_NETWORK_PROFILE': profile}
+                if provider:
+                    values['OPENCODE_CONTAINER_PROVIDER'] = provider
+                result = self.run_wrapper('run', 'x', **values)
+                self.assertEqual(result.returncode, 5, result.stderr)
+                self.assertIn('network mode=provider', result.stderr)
+                self.assertIn(f'network profile={profile} policy=fixture-policy', result.stderr)
+                self.assertNotIn('not forwarding', result.stderr)
+                order = [n for n in self.names() if n in ('qualify.py', 'create', 'exec', 'start', 'rm')]
+                self.assertEqual(order, ['qualify.py', 'create', 'start', 'exec', 'create', 'start', 'rm', 'rm'])
+                agent = self.creates()[1]
+                forwarded = self.env_values(agent)
+                self.assertIn('HTTPS_PROXY=http://127.0.0.1:18080', forwarded)
+                self.assertNotIn('HTTPS_PROXY', forwarded)
+                self.assertNotIn('no_proxy', forwarded)
+                self.assertIn('no_proxy=localhost,127.0.0.1,::1', forwarded)
+                self.assertEqual(agent[agent.index('d' * 64) + 1:],
+                                 ['--provider', '--', *relay, '/usr/local/bin/opencode', 'run', 'x'])
+                for name in keys:
+                    self.assertEqual(name in forwarded, name == credential)
+                for flag in ('AUTOUPDATE', 'DEFAULT_PLUGINS', 'LSP_DOWNLOAD', 'MODELS_FETCH', 'SHARE'):
+                    self.assertIn(f'OPENCODE_DISABLE_{flag}=1', agent)
+                self.assertEqual([c[-1] for c in self.calls() if c[0] == 'rm'], ['a' * 64, 'b' * 64])
+        for provider in ('anthropic', 'google'):
+            with self.subTest(provider=provider):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**(fixture | {'OPENCODE_CONTAINER_PROVIDER': provider}))
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f'OPENCODE_CONTAINER_PROVIDER={provider} does not match '
+                              'OPENCODE_CONTAINER_NETWORK_PROFILE=openai-api', result.stderr)
+                self.assertEqual(self.calls(), [])
+        self.log.unlink(missing_ok=True)
+        result = self.run_wrapper('--container-shell', OPENCODE_CONTAINER_YOLO='1', **fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        agent = self.creates()[1]
+        self.assertEqual(agent[agent.index('d' * 64) + 1:], ['--provider', '--', *relay, '/bin/bash'])
+
+    def test_restricted_modes_reserve_network_variables(self):
+        listed = 'HTTPS_PROXY SSL_CERT_FILE OPENCODE_DISABLE_AUTOUPDATE GH_TOKEN'
+        host = {'HTTPS_PROXY': 'http://host-proxy:3128', 'SSL_CERT_FILE': '/host/ca.pem',
+                'OPENCODE_DISABLE_AUTOUPDATE': '0', 'GH_TOKEN': 'synthetic'}
+        fixture = self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': 'offline'} | host
+        result = self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS=listed, **fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name in ('HTTPS_PROXY', 'SSL_CERT_FILE', 'OPENCODE_DISABLE_AUTOUPDATE'):
+            self.assertIn(f'skipping {name}, which the wrapper sets itself', result.stderr)
+        create = self.env_values(self.create())
+        self.assertIn('GH_TOKEN', create)
+        for name in ('HTTPS_PROXY', 'SSL_CERT_FILE'):
+            self.assertNotIn(name, create)
+        self.assertIn('OPENCODE_DISABLE_AUTOUPDATE=1', create)
+        self.log.unlink()
+        del self.wrapper
+        result = self.run_wrapper(OPENCODE_CONTAINER_ENV_VARS=listed, OPENCODE_CONTAINER_PROVIDER='none', **host)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('skipping', result.stderr)
+        create = self.env_values(self.create())
+        for name in ('HTTPS_PROXY', 'SSL_CERT_FILE', 'OPENCODE_DISABLE_AUTOUPDATE', 'GH_TOKEN'):
+            self.assertIn(name, create)
+        self.assertNotIn('OPENCODE_DISABLE_AUTOUPDATE=1', create)
+
+    def test_failed_qualification_stops_before_session_resources(self):
+        for mode in ('offline', 'provider'):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(FAKE_QUALIFY_STATUS='3',
+                                          **(self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': mode}))
+                self.assertEqual(result.returncode, 3, result.stderr)
+                self.assertFalse(any(c[0] == 'create' for c in self.calls()))
+                self.assertEqual(list((self.base / 'runtime').iterdir()), [])
+                shutil.rmtree(self.base / 'install')
+
+    def test_interrupted_restricted_helpers_are_bounded_and_clean_owned_proxy(self):
+        fixture = self.restricted_fixture() | {'OPENCODE_CONTAINER_NETWORK': 'provider'}
+        for stall, marker in (('exec', '.stalled-exec'), ('qualify', '.stalled-qualify')):
+            for interrupt in (False, True):
+                if stall == 'qualify' and not interrupt:
+                    continue
+                with self.subTest(stall=stall, interrupt=interrupt):
+                    self.log.unlink(missing_ok=True)
+                    Path(str(self.log) + marker).unlink(missing_ok=True)
+                    values = fixture | ({'FAKE_STALL': 'exec'} if stall == 'exec' else {'FAKE_QUALIFY_STALL': '1'})
+                    process = self.start_restricted(**values)
+                    self.wait_path(Path(str(self.log) + marker), process)
+                    started = time.monotonic()
+                    if interrupt:
+                        process.terminate()
+                    stdout, stderr = process.communicate(timeout=25)
+                    self.assertEqual(process.returncode, 143 if interrupt else 1, stdout + stderr)
+                    self.assertLess(time.monotonic() - started, 21)
+                    self.assertEqual(len(self.creates()), 1 if stall == 'exec' else 0)
+                    self.assertEqual([c[-1] for c in self.calls() if c[0] == 'rm'], ['b' * 64] if stall == 'exec' else [])
+                    self.assertEqual(list((self.base / 'runtime').iterdir()), [])
+
+    def test_qualification_entry_points(self):
+        for args in (('--container-qualify', '--container-shell'), ('run', 'x', '--container-qualify')):
+            result = self.run_wrapper(*args)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('--container-qualify must be used alone', result.stderr)
+            self.assertEqual(self.calls(), [])
+        fixture = self.restricted_fixture()
+        result = self.run_wrapper('--container-qualify', **fixture)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c[:2] for c in self.calls()], [['qualify.py', 'qualify']])
+        result = self.run_wrapper('--container-qualify-probe', 'run', 'x', **fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('fixed qualification probe must be used alone', result.stderr)
+        self.log.unlink()
+        result = self.run_wrapper('--container-qualify-probe', **fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('qualification probes require restricted networking', result.stderr)
+        self.assertFalse(any(c[0] in ('image', 'build', 'create') for c in self.calls()))
+
+    def test_restricted_credentials_match_the_agent_profile(self):
+        profile = json.loads((ROOT / 'agent/profile.json').read_text())
+        text = WRAPPER.read_text()
+        for method, item in profile['auth'].items():
+            self.assertRegex(text, rf"{item['policy_profile']}\) profile_provider=\S+ profile_credential={item['credential_env']} ;;")
 
 if __name__ == '__main__':
     unittest.main()

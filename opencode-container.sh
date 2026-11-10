@@ -7,6 +7,8 @@ usage() {
 Usage: opencode-container.sh [container options] [OpenCode arguments...]
 
 Container options:
+  --container-setup      interactively prepare a complete user installation and
+                         its managed launcher; must be used alone
   --container-qualify    verify a prepared restricted installation with fixed
                          local controls; must be used alone
   --container-build      build or refresh the container image before starting
@@ -99,7 +101,14 @@ Worktree mode exposes the entire parent beyond the workspace.
 Linux rootless Podman and host GNU coreutils timeout are required.
 opencode-wrapper is a deprecated alias of this script.
 
-Migration: every launch now needs an explicit OPENCODE_CONTAINER_NETWORK. Set
+New users must first run: bash ./opencode-container.sh --container-setup
+Then use the managed launch command printed by setup (by default
+~/.local/bin/opencode-container) from your workspace. An ordinary launch with an
+unset or empty OPENCODE_CONTAINER_NETWORK stops with setup guidance before
+runtime checks or state creation.
+
+Direct operator launches remain available with an explicit mode.
+Migration: every direct launch needs an explicit OPENCODE_CONTAINER_NETWORK. Set
 OPENCODE_CONTAINER_NETWORK=unrestricted to keep the previous networking
 behavior, and add OPENCODE_CONTAINER_MAINTENANCE=1 to commands that build the
 image, e.g.:
@@ -151,6 +160,16 @@ for arg in "$@"; do
     fi
 done
 
+for arg in "$@"; do
+    if [[ "$arg" == --container-setup ]]; then
+        [[ $# == 1 ]] || die '--container-setup must be used alone'
+        [[ -t 0 && -t 1 ]] || die '--container-setup requires an interactive terminal'
+        command -v python3 >/dev/null || die 'host Python 3 is required for interactive setup'
+        setup_script=$(readlink -f -- "${BASH_SOURCE[0]}")
+        exec python3 -I "$(dirname -- "$setup_script")/setup/setup.py"
+    fi
+done
+
 build_image=0
 qualification_probe=0
 shell_mode=0
@@ -168,10 +187,14 @@ for arg in "$@"; do
     esac
 done
 
-# An explicit mode precedes every other check, engine query and state operation.
-# add-container-setup replaces this message with guided setup.
-[[ -n "${OPENCODE_CONTAINER_NETWORK:-}" ]] \
-    || die 'OPENCODE_CONTAINER_NETWORK is required: set offline, provider, or unrestricted (unrestricted keeps the previous networking behavior)'
+# An explicit or managed mode precedes every other check, engine query and
+# state operation. Files in the current directory never supply it.
+if [[ -z "${OPENCODE_CONTAINER_NETWORK:-}" ]]; then
+    setup_wrapper=${BASH_SOURCE[0]}
+    [[ "$setup_wrapper" == /* ]] || setup_wrapper="$PWD/$setup_wrapper"
+    printf -v setup_command 'bash %q --container-setup' "$setup_wrapper"
+    die "setup required: run $setup_command; use the managed launcher afterward or explicitly set OPENCODE_CONTAINER_NETWORK for an operator workflow (offline, provider, or unrestricted; unrestricted keeps the previous networking behavior)"
+fi
 network_mode=$OPENCODE_CONTAINER_NETWORK
 case "$network_mode" in
     offline|provider|unrestricted) ;;
@@ -228,7 +251,7 @@ image_override=${OPENCODE_CONTAINER_IMAGE:-}
     || die 'OPENCODE_CONTAINER_IMAGE must not contain whitespace or control characters'
 
 # Exposure controls are validated before any engine query or state creation.
-readonly AUTHORITATIVE_NAMES=' HOME USER XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME CONTAINER_HOST CONTAINER_CONNECTION '
+readonly AUTHORITATIVE_NAMES=' HOME USER XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME OPENCODE_CONTAINER_CONFIG_DIR CONTAINER_HOST CONTAINER_CONNECTION '
 readonly ALL_PROFILE_NAMES='ANTHROPIC_API_KEY OPENAI_API_KEY OPENAI_BASE_URL GOOGLE_API_KEY GOOGLE_GENERATIVE_AI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_BEARER_TOKEN_BEDROCK AZURE_RESOURCE_NAME AZURE_API_KEY OPENCODE_API_KEY'
 provider_selected=0
 provider_names=()
@@ -389,6 +412,7 @@ check_private_dir() {
     printf '%s' "$resolved"
 }
 state_home=''
+state_request=''
 # An empty value selects shared state, like an unset one (as in the other wrappers).
 if [[ -n "${OPENCODE_CONTAINER_STATE_DIR:-}" ]]; then
     state_request=$OPENCODE_CONTAINER_STATE_DIR
@@ -404,13 +428,6 @@ if [[ -n "${OPENCODE_CONTAINER_STATE_DIR:-}" ]]; then
     state_physical=${state_physical%/}
     [[ "$state_physical/" != "$workspace_mount/"* && "$workspace_mount/" != "$state_physical/"* ]] \
         || die "OPENCODE_CONTAINER_STATE_DIR must not overlap the workspace: $state_request"
-    if [[ ! -e "$state_request" && ! -L "$state_request" ]]; then
-        (umask 077; mkdir -p -- "$state_request") || die "cannot create OPENCODE_CONTAINER_STATE_DIR: $state_request"
-    fi
-    state_home=$(check_private_dir OPENCODE_CONTAINER_STATE_DIR "$state_request") || exit 1
-    for relative in .config/opencode .local/share/opencode .cache/opencode .local/state/opencode; do
-        (umask 077; mkdir -p -- "$state_home/$relative") || die "cannot create private state: $state_home/$relative"
-    done
 fi
 
 if ! command -v podman >/dev/null 2>&1; then
@@ -443,7 +460,7 @@ case "${CONTAINER_HOST:-}" in
     *) die 'use local Podman or an explicit same-host Unix CONTAINER_HOST; TCP/SSH is unsupported' ;;
 esac
 capture_response engine_response podman info --format '{{.Host.Security.Rootless}} {{.Host.OS}} {{.Host.ServiceIsRemote}}' \
-    || die 'cannot query launch engine'
+    || die 'cannot query Podman or invalid engine response; check local rootless Podman or the same-host Unix service'
 engine_response=${engine_response%$'\n'}
 [[ "$engine_response" != *$'\n'* && "$engine_response" != *$'\r'* ]] || die 'invalid launch engine records'
 launch_pattern='^[[:blank:]]*true[[:blank:]]+linux[[:blank:]]+(true|false)[[:blank:]]*$'
@@ -542,7 +559,22 @@ xdg_args=(
     --env "XDG_DATA_HOME=$CONTAINER_HOME/.local/share"
     --env "XDG_CACHE_HOME=$CONTAINER_HOME/.cache"
     --env "XDG_STATE_HOME=$CONTAINER_HOME/.local/state"
+    # The profile's configuration variable names the effective directory in the
+    # session, as CODEX_HOME does for Codex; the host value is never forwarded.
+    --env "OPENCODE_CONTAINER_CONFIG_DIR=$CONTAINER_HOME/.config/opencode"
 )
+# State is created and validated after engine verification, as in the reference
+# order; only lexical checks precede the engine.
+if [[ -n "${OPENCODE_CONTAINER_STATE_DIR:-}" ]]; then
+    if [[ ! -e "$state_request" && ! -L "$state_request" ]]; then
+        (umask 077; mkdir -p -- "$state_request") || die "cannot create OPENCODE_CONTAINER_STATE_DIR: $state_request"
+    fi
+    state_home=$(check_private_dir OPENCODE_CONTAINER_STATE_DIR "$state_request") || exit 1
+    for relative in .config/opencode .local/share/opencode .cache/opencode .local/state/opencode; do
+        (umask 077; mkdir -p -- "$state_home/$relative") || die "cannot create private state: $state_home/$relative"
+    done
+fi
+
 # Shared state uses fixed host paths below HOME (host XDG_*_HOME variables do
 # not relocate it); only the configuration directory has an override.
 writable_state=()
@@ -758,6 +790,8 @@ creation_pending=0
 shutdown_deadline=0
 qualification_check_pid=''
 session_start_pid=''
+diagnostics_pid=''
+diagnostics_fd=''
 ownership_label=io.opencode-container.session
 
 cleanup_warning() {
@@ -893,6 +927,17 @@ shutdown() {
         fi
         reap_client "$create_pid"
         reap_client "$client_pid"
+        if [[ -n "$diagnostics_fd" ]]; then
+            exec {diagnostics_fd}>&-
+            diagnostics_fd=''
+        fi
+        if [[ -n "$diagnostics_pid" ]]; then
+            # Drain the final client output before reaping the stderr filter.
+            drain_until=$((SECONDS + 1))
+            while child_running "$diagnostics_pid" && ((SECONDS < drain_until)); do sleep 0.01; done
+            reap_helper "$diagnostics_pid" 1
+            diagnostics_pid=''
+        fi
         if ((creation_pending)) && [[ -z "$container_id" ]]; then
             recover_container
             if [[ -n "$container_id" ]]; then
@@ -1021,8 +1066,21 @@ configured_budgets=$(timeout --kill-after=1s 10s podman inspect --type container
     || die "session resource budgets were not applied (expected memory=$memory_bytes nano_cpus=$cpu_nano pids=$pids_limit); check rootless cgroup v2 cpu/memory/pids controller delegation; session not started"
 started_at=$SECONDS
 # Explicit redirection keeps Bash from replacing background-client stdin.
-podman start --attach --interactive --sig-proxy=false "$container_id" <&0 &
-client_pid=$!
+if [[ -f "$SCRIPT_DIR/setup/diagnostics.py" ]] && command -v python3 >/dev/null; then
+    # Optional for unrestricted installs without host Python. Only the exact
+    # successful Podman 4.3 restart-check line changes level; errors pass.
+    mkfifo -- "$session_dir/diagnostics.pipe"
+    python3 -I "$SCRIPT_DIR/setup/diagnostics.py" <"$session_dir/diagnostics.pipe" >&2 &
+    diagnostics_pid=$!
+    exec {diagnostics_fd}>"$session_dir/diagnostics.pipe"
+    podman start --attach --interactive --sig-proxy=false "$container_id" <&0 2>&"$diagnostics_fd" {diagnostics_fd}>&- &
+    client_pid=$!
+    exec {diagnostics_fd}>&-
+    diagnostics_fd=''
+else
+    podman start --attach --interactive --sig-proxy=false "$container_id" <&0 &
+    client_pid=$!
+fi
 status=0
 wait "$client_pid" || status=$?
 client_pid=''

@@ -149,6 +149,8 @@ elif args[0] == 'start':
         pathlib.Path(str(log) + '.started').touch()
         while True:
             time.sleep(0.05)
+    if os.environ.get('FAKE_START_STDERR'):
+        sys.stderr.write(os.environ['FAKE_START_STDERR']); sys.stderr.flush()
     if not os.environ.get('FAKE_NO_STDIN'):
         print('stdin:' + sys.stdin.read())
     sys.exit(int(os.environ.get('FAKE_EXIT', '0')))
@@ -668,8 +670,19 @@ class WrapperTests(unittest.TestCase):
                 result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR=value)
                 self.assertEqual(result.returncode,1,result.stderr)
                 self.assertIn('OPENCODE_CONTAINER_STATE_DIR' if value!=str(foreign) else 'must be private',result.stderr)
-                self.assertFalse(self.calls())
+                # Lexical checks precede the engine; privacy is checked after it.
+                if value==str(foreign):
+                    self.assertFalse(any(c[0] in ('image','build','create') for c in self.calls()))
+                else:
+                    self.assertFalse(self.calls())
         self.assertFalse((self.project/'state').exists())
+        # A failed engine query leaves a missing isolated state directory uncreated.
+        missing=self.base/'not-created'
+        self.log.unlink(missing_ok=True)
+        result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR=str(missing),FAKE_INFO_STATUS='19')
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('cannot query Podman',result.stderr)
+        self.assertFalse(missing.exists())
         # An empty value selects shared state, like an unset one.
         self.log.unlink(missing_ok=True)
         result=self.run_wrapper(OPENCODE_CONTAINER_STATE_DIR='')
@@ -1126,7 +1139,8 @@ class WrapperTests(unittest.TestCase):
                     result = subprocess.run(['/bin/bash', str(WRAPPER), *args, 'run', 'x'], cwd=self.project,
                                             env=env, text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 1, result.stderr)
-                    self.assertIn('OPENCODE_CONTAINER_NETWORK is required', result.stderr)
+                    self.assertIn(f'setup required: run bash {WRAPPER} --container-setup', result.stderr)
+                    self.assertIn('explicitly set OPENCODE_CONTAINER_NETWORK', result.stderr)
                     self.assertIn('offline, provider, or unrestricted', result.stderr)
                     self.assertIn('unrestricted keeps the previous networking behavior', result.stderr)
                     self.assertEqual(self.calls(), [])
@@ -1443,6 +1457,54 @@ class WrapperTests(unittest.TestCase):
         text = WRAPPER.read_text()
         for method, item in profile['auth'].items():
             self.assertRegex(text, rf"{item['policy_profile']}\) profile_provider=\S+ profile_credential={item['credential_env']} ;;")
+    def test_setup_entry_point_is_dedicated_and_help_takes_precedence(self):
+        for args, message in ((('--container-setup',), 'requires an interactive terminal'),
+                              (('--container-setup', '--container-shell'), 'must be used alone'),
+                              (('run', 'x', '--container-setup'), 'must be used alone')):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(*args, OPENCODE_CONTAINER_NETWORK='')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('--container-setup ' + message, result.stderr)
+                self.assertEqual(self.calls(), [])
+                self.assertFalse((self.base / 'home').exists())
+        for args in (('--container-setup', '--container-help'), ('--container-help', '--container-setup')):
+            result = self.run_wrapper(*args, OPENCODE_CONTAINER_NETWORK='')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('--container-setup', result.stdout)
+            self.assertIn('New users must first run', result.stdout)
+            self.assertEqual(self.calls(), [])
+
+    def test_client_stderr_passes_through_the_diagnostics_filter(self):
+        restart = 'time="2026-11-09T21:38:10Z" level=error msg="Should restart: false"\n'
+        for status in ('0', '3'):
+            with self.subTest(status=status):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(FAKE_EXIT=status, FAKE_START_STDERR=restart + 'Error: real failure\n')
+                self.assertEqual(result.returncode, int(status), result.stderr)
+                self.assertIn('level=info msg="Should restart: false"', result.stderr)
+                self.assertNotIn('level=error msg="Should restart', result.stderr)
+                self.assertIn('Error: real failure', result.stderr)
+                self.assertIn('stdin:input payload', result.stdout)
+        # Without the shared filter the client stderr is passed unchanged.
+        install = self.base / 'no-filter'
+        install.mkdir()
+        self.wrapper = install / 'opencode-container.sh'
+        shutil.copyfile(WRAPPER, self.wrapper)
+        self.wrapper.chmod(0o755)
+        result = self.run_wrapper(FAKE_START_STDERR=restart)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('level=error msg="Should restart: false"', result.stderr)
+    def test_session_names_the_effective_configuration_directory(self):
+        host=self.base/'host-config'
+        result=self.run_wrapper(OPENCODE_CONTAINER_CONFIG_DIR=str(host),
+                                OPENCODE_CONTAINER_ENV_VARS='OPENCODE_CONTAINER_CONFIG_DIR')
+        self.assertEqual(result.returncode,0,result.stderr)
+        values=[v for i,v in enumerate(self.create()[:-1]) if self.create()[i-1]=='--env']
+        self.assertIn('OPENCODE_CONTAINER_CONFIG_DIR=/opencode-home/.config/opencode',values)
+        self.assertNotIn('OPENCODE_CONTAINER_CONFIG_DIR',values)
+        self.assertNotIn(f'OPENCODE_CONTAINER_CONFIG_DIR={host}',values)
+        self.assertIn('skipping OPENCODE_CONTAINER_CONFIG_DIR, which the wrapper sets itself',result.stderr)
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,9 +1,8 @@
 # Network policy contract
 
-Status: ported by the `add-network-egress` change.
-- Restricted modes are implemented and verified with synthetic and real rootless runtime suites.
+Status: ported by the `add-network-egress` and `add-container-setup` changes.
+- Restricted modes, guided setup and the managed launcher are implemented and verified with synthetic and real rootless runtime suites; setup is described in [docs/setup.md](setup.md).
 - The authenticated provider checks are operator-run and recorded separately in [the validation record](validation.md).
-- Guided setup and the managed launcher follow in `add-container-setup`.
 
 The durable contract is [network-egress](../openspec/specs/network-egress/spec.md),
 with [host-ca-trust](../openspec/specs/host-ca-trust/spec.md) and the session,
@@ -12,21 +11,24 @@ isolation, delegation, launcher and image specifications in `openspec/specs/`.
 ## Reference and intentional differences
 
 The shared components are copied unchanged from `claude-container` at tag
-`sandbox-ref-3` (commit `449ce60f956f0b51ff0e8818819c1377f7902a4d`):
+`sandbox-ref-5` (commit `3388b6ee45a1b9943f8f4aed77c0b1740a9ab4f8`):
 
 - `network/` (except the build output `network/bin/`);
-- `setup/diagnostics.py`;
-- the shared tests listed in that tag's `tests/test_alignment.py`, except
-  `test_alignment.py` and `test_setup.py`, which arrive with
-  `add-container-setup`.
+- `setup/`;
+- the shared tests listed in that tag's `tests/test_alignment.py`.
 
-`sandbox-ref-3` is `sandbox-ref-2` plus one shared-test fix that this port
-found: the guarded production test now mounts a writable profile home, because
-OpenCode writes there even for `--version`.
+`sandbox-ref-5` is `sandbox-ref-2` plus three shared-test fixes that this port
+found:
+- the guarded production test mounts a writable profile home (`sandbox-ref-3`),
+  because OpenCode writes there even for `--version`;
+- the setup test supports API-key-only profiles (`sandbox-ref-4`);
+- the setup test supports a nested configuration home such as
+  `.config/opencode` (`sandbox-ref-5`).
 
 `tests/test_reference_copy.py` holds the SHA-256 of every copied file. It fails
-on a changed, missing or extra file, or on a profile identifier (`opencode`,
-`anthropic`, `openai`, `openrouter`) in a copied file. A defect in a shared
+on a changed, missing or extra file; the unchanged `tests/test_alignment.py`
+fails on a profile identifier (`opencode`, `anthropic`, `openai`,
+`openrouter`) in a shared file and checks the wrapper against the profile. A defect in a shared
 file is fixed in `claude-container` first and then copied; this repository
 never carries a fork. [network/README.md](../network/README.md) is part of the
 copy and describes the shared mechanism in agent-neutral terms.
@@ -130,6 +132,18 @@ with a warning. Session sharing uses `opncd.ai`, which no profile allows.
 - Qualification reports are local (`locally-qualified`); the release
   acceptance inventory is empty.
 
+## Five-wrapper parity
+
+The same OpenCode row appears in `claude-container` and `codex-container`.
+
+| Wrapper | Contract adoption | Implementation | Real enforcement | Auth compatibility |
+| --- | --- | --- | --- | --- |
+| Claude | Reference (`sandbox-ref-5`) | Mandatory bootstrap, multiplexed proxy and guided setup integrated | See the Claude validation record | Account login, reuse and refresh passed; real-key API unavailable |
+| Codex | Ported from `sandbox-ref-5`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-09) | Pending operator device-code login, refresh and API-key checks; synthetic Responses API streaming and tool call passed |
+| Antigravity | Pending (profile-based port planned) | Not assessed | Not assessed | Not assessed |
+| OpenCode | Ported from `sandbox-ref-5`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Pending operator API-key checks for the four profiles; synthetic Chat Completions streaming and tool call passed |
+| Pi | Pending (profile-based port planned) | Not assessed | Not assessed | Not assessed |
+
 ## Port status
 
 | Item | Status |
@@ -137,5 +151,6 @@ with a warning. Session sharing uses `opncd.ai`, which no profile allows.
 | Shared copy and identifier scan | Done (`tests/test_reference_copy.py`) |
 | Shared suites, guard, mux, policy, feasibility, qualification | Passed in the runner; see [validation](validation.md) |
 | Wrapper integration and restricted runtime acceptance | Passed; see [validation](validation.md) |
+| Shared setup suite and alignment | Passed (`tests/test_setup.py`, `tests/test_alignment.py`) |
+| Guided setup acceptance | Passed; see [validation](validation.md) |
 | Authenticated provider checks | Operator-run, pending |
-| `test_alignment.py`, `test_setup.py`, guided setup, parity row | `add-container-setup` |

@@ -1,8 +1,8 @@
 """Per-agent check that the shared components equal the Claude reference copy.
 
-Temporary until ``add-container-setup`` brings the unchanged shared
-``tests/test_alignment.py``. ``network/``, ``setup/diagnostics.py`` and the
-shared tests must stay byte-identical to ``claude-container`` at the reference
+Complements the shared ``tests/test_alignment.py`` (identifier scan and
+wrapper consistency) with a byte-identity check: ``network/``, ``setup/`` and
+the shared tests must stay byte-identical to ``claude-container`` at the reference
 tag; a defect is fixed there first and copied afterwards.
 """
 import hashlib
@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE_TAG = 'sandbox-ref-3'
-REFERENCE_COMMIT = '449ce60f956f0b51ff0e8818819c1377f7902a4d'
+REFERENCE_TAG = 'sandbox-ref-5'
+REFERENCE_COMMIT = '3388b6ee45a1b9943f8f4aed77c0b1740a9ab4f8'
 SIBLING = ROOT.parent / 'claude-container'
 # Shared directories whose complete file set is fixed by the manifest.
 CLOSED_DIRECTORIES = ('network', 'setup')
@@ -50,7 +50,11 @@ MANIFEST = {
     'network/revisions.py': 'fa35bcac26f5590c0d0b9477fea2773faa1f1eb285215e735e5cb8aa6b2b9cb1',
     'network/session.py': '2e13f1fe9c4d9f5299abe00f0b8a0fc6f40c78eefceff2a0b79b0c4e170264e6',
     'network/tls_client_hello.py': 'a4ce71c1710cb1dba7c9ad5889b16549b5d7ebb4a7ae7c2edbf96eab32771e80',
+    'setup/common.py': '95c7a215e2d30e4c1d019b2c1ab73f8e0ca6f6fd6deef799e9e2e49d28990284',
     'setup/diagnostics.py': 'd6f2a81010f115f5631c829ccc70c39ba329b1baf44b393e34a33a884a3bdc3d',
+    'setup/launch.py': '72182ed789a6349fe3d660af88315c4665aa892bba4799b6a4e4969965baefc6',
+    'setup/setup.py': 'd8308480089dadae64e3613b6ee3cf591140bf4d8860451ef495bca6f32073bb',
+    'setup/smoke.py': '696abeb7b8a991c8d916348300b8435e315c2973877805f03383c6665ce63da3',
     'tests/guard_bind_fixture.py': 'd6e4eb85cedb249ec9c6b4f2a026d14acbd5e1309a63ac036647be06781287cc',
     'tests/guard_mux_fixture.py': 'c641e419f5f2939c0c0af34d8a19dfcbcdf42302e0686e2d446bfad1bfc85f3d',
     'tests/guard_runtime_fixture.py': '73461452420305dfbacdb24ccb2336c490667f961e816f5b285ef15d35455597',
@@ -62,6 +66,7 @@ MANIFEST = {
     'tests/proxy_budget_fixture.py': 'cde9c888d3842045752a93ec1963110749a3d9cd4d48ef76d199e0b4847fea67',
     'tests/sandbox_profile.py': 'adf6dd51417ec62cf6c2ccc84b8789e41a4f8b8ba46d1be1635d3ab2445fa60e',
     'tests/test_agent_profile.py': '28642e87780cc8ee9302da93fddb0bfac36a96e7c435247354040d863cd48812',
+    'tests/test_alignment.py': '4f1e68c087fe95abd34818385d7a12e1f36f86ca0d50e5dbfe57b22724de588c',
     'tests/test_guard.py': '78c623761899aee82e912888c2c769d86bf55bd445d47dfc2f09d4f5f1484f2c',
     'tests/test_mux.py': 'fb3a7cf8675d247c6609a337d56682d484cde6296e14ea939bfde70537cc8446',
     'tests/test_network_feasibility.py': '4cff9c50b996fd38f2b21b75abe73de77531e554522b04641fcb5288178d1e1c',
@@ -69,6 +74,7 @@ MANIFEST = {
     'tests/test_platform.py': 'e5e30cbb9edb3561e0a6cac67641ab27986ce9e6bd425e5be96976c39fb5fecf',
     'tests/test_qualification.py': '93448298bdf57862f2c0be72f96c19da33a2d2a3f6e7f588bfc6f4fc92561c26',
     'tests/test_session.py': 'f3b01c9965ee9785d6c910537485faa8cd3a11402b79b0cbb1401b1372e4df28',
+    'tests/test_setup.py': 'fab4692fbcd7c61e60c9a47295545f2c906e09a70237d4a840a9eb35947a56a6',
     'tests/test_tls_client_hello.py': '7d8f889af0c4a8f6d40038bdbda915f3afa3adc08c47b5506a02180b595b7ccc',
     'tests/test_tls_proxy.py': '77f9dda900a8ee28ef76d018d862bd0475193f5b90840fd29005a04fe4403e83',
     'tests/tls_binding_fixture.py': '062fe63ec1fc8ad399199a5f5823515070d5d1fa4ac62607f8722a61347f3331',
@@ -128,10 +134,13 @@ class ReferenceCopy(unittest.TestCase):
             copy = scratch_copy(directory)
             target = copy / 'network/control.py'
             target.write_bytes(target.read_bytes() + b' ')
+            setup = copy / 'setup/common.py'
+            setup.write_bytes(setup.read_bytes() + b' ')
             (copy / 'network/mux.py').unlink()
             (copy / 'network/local.py').write_text('')
             self.assertEqual(differences(copy), [
-                'changed network/control.py', 'missing network/mux.py', 'extra network/local.py'])
+                'changed network/control.py', 'missing network/mux.py', 'changed setup/common.py',
+                'extra network/local.py'])
 
     @unittest.skipUnless((ROOT / 'agent/profile.json').is_file(), 'agent profile not written yet')
     def test_shared_files_contain_no_agent_identifiers(self):

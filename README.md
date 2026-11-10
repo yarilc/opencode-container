@@ -66,6 +66,30 @@ socket access for the invoking user and an appropriate SELinux policy on the
 host, then retry explicitly. Delegation grants the service user's Podman
 authority, including launching containers with host mounts beyond the workspace.
 
+## First run: guided setup
+
+New users run the guided setup once, from a reviewed checkout, as the non-root
+Linux/WSL user who will use the sandbox:
+
+```bash
+bash ./opencode-container.sh --container-setup
+```
+
+Setup asks for the network mode (default `provider`), the API-key method
+(`anthropic`, `openai`, `openrouter` or `opencode-zen`), shared or isolated
+state, delegation, YOLO, CA trust, budgets and lifetime. It discloses the
+residual exfiltration risk of provider mode, prepares the images and the guard
+under explicit maintenance consent, installs a protected release, qualifies it
+and runs a credential-free smoke check. It never stores a key; provider mode
+ends with `Authentication pending` and the variable to supply. Afterward, launch
+from a workspace with the managed command, by default
+`~/.local/bin/opencode-container`. See [docs/setup.md](docs/setup.md).
+
+An ordinary launch with an unset or empty `OPENCODE_CONTAINER_NETWORK` stops
+with `setup required:` guidance before runtime checks or state creation. Direct
+operator launches with an explicit mode remain available (see
+[Network modes](#network-modes)).
+
 ## Usage
 
 Make the wrapper executable and add an alias to your shell configuration:
@@ -228,8 +252,9 @@ OpenRouter, AWS, Azure and GitHub variable.
 
 ## Network modes
 
-`OPENCODE_CONTAINER_NETWORK` is required for every launch; an unset or empty
-value stops before any engine call or state change. Unknown values fail before
+`OPENCODE_CONTAINER_NETWORK` is required for every launch, either from the
+managed launcher or set explicitly; an unset or empty value stops with
+`setup required:` guidance before any engine call or state change. Unknown values fail before
 image operations, and a failed restricted launch never retries with
 unrestricted networking.
 
@@ -240,7 +265,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-3`; see
+unchanged from its tag `sandbox-ref-5`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -336,8 +361,8 @@ Limits:
 
 ### Operator build inputs
 
-Until guided setup arrives (`add-container-setup`), prepare the artifacts
-manually, under maintenance authorization:
+Guided setup prepares these artifacts. For direct operator workflows, prepare
+them manually, under maintenance authorization:
 
 ```bash
 export OPENCODE_CONTAINER_MAINTENANCE=1
@@ -383,7 +408,10 @@ The host paths are fixed below `$HOME`; host `XDG_*_HOME` variables do not
 relocate them. This matches the state model of the shared sandbox code, which
 checks one configuration directory plus fixed directories below `$HOME`.
 `OPENCODE_CONTAINER_CONFIG_DIR`, a private absolute directory, replaces only the
-configuration directory. HOME and the override must be absolute. Other files
+configuration directory. Inside the session, `OPENCODE_CONTAINER_CONFIG_DIR`
+is always set to `/opencode-home/.config/opencode`, the effective configuration
+directory; the host value is never forwarded. HOME and the override must be
+absolute. Other files
 written below `/opencode-home` do not survive the session.
 
 Missing state directories are created privately with a scoped umask. Every
@@ -568,6 +596,8 @@ OPENCODE_CONTAINER_NETWORK=unrestricted OPENCODE_CONTAINER_MAINTENANCE=1 ./openc
 bash tests/run-runtime.sh                  # unrestricted runtime suite
 bash tests/run-runtime.sh --wrapper        # wrapper contracts with a fake engine
 bash tests/run-runtime.sh --shared         # shared suites copied from claude-container
+bash tests/run-runtime.sh --setup          # shared setup suite
+bash tests/run-runtime.sh --setup-runtime  # guided setup with real rootless Podman
 bash tests/run-runtime.sh --network        # restricted modes with real rootless Podman
 bash tests/run-runtime.sh --guard          # guard runtime fixtures (needs the toolchain image)
 ```

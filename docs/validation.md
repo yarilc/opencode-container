@@ -569,3 +569,14 @@ its setup is unchanged. The changed shared files are copied unchanged and
 | `--shared` (includes `test_reference_copy.py`) | Passed: 144 tests, 27 skipped (run by the modes) |
 | `--setup` | Passed: 64 tests |
 | `--qualification` | Passed: 18 tests |
+
+## Adoption of `sandbox-ref-8`: 2026-11-10
+
+`claude-container` `sandbox-ref-8` (commit `12cffab`) changes only the shared
+`tests/test_setup.py`: the runtime build test patches the dispatch point
+`build_runtime`, so it also holds for profiles that build through the wrapper.
+
+| Check | Result |
+| --- | --- |
+| `--shared` (includes `test_reference_copy.py`) | Passed: 144 tests, 27 skipped (run by the modes) |
+| `--setup` | Passed: 64 tests |

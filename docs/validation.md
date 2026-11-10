@@ -485,3 +485,56 @@ Not run:
 Known limitations, unchanged:
 - **Lifetime notice.** It compares whole seconds, so it can be missing when a lifetime-limited session ends just past the limit.
 - **Test runner stdin.** `tests/run-runtime.sh` passes `--interactive`, so suites that inherit stdin need it closed: run the runner with `</dev/null`, or give the calls explicit input, as `test_deprecated_shim` now does.
+
+## Guided setup (`add-container-setup`): 2026-11-10
+
+Environment as in the network egress section. The shared code was moved to
+`claude-container` tag `sandbox-ref-5` (commit
+`3388b6ee45a1b9943f8f4aed77c0b1740a9ab4f8`). This port found two defects in
+the shared setup test, fixed in Claude and adopted by Codex:
+- **`sandbox-ref-4`:** the test required an authentication method with
+  `login_args`. OpenCode's methods are API-key only, so it raised
+  `StopIteration` at import.
+- **`sandbox-ref-5`:** two checks assumed a single-component `config_home`.
+  OpenCode's is `.config/opencode`, so they raised `FileNotFoundError`.
+
+Wrapper-side alignments found by the shared tests:
+- **Engine message.** The engine-query failure message now uses the reference
+  wording, `cannot query Podman or invalid engine response; ...`.
+- **State order.** `OPENCODE_CONTAINER_STATE_DIR` is created and validated
+  after the engine verification, following the reference order. The lexical
+  checks (absolute path, workspace overlap) still precede the engine. Before
+  this change, a failed engine query left a new isolated directory behind.
+- **Configuration variable.** The shared smoke check requires the profile's
+  configuration variable to name a writable directory inside the session. The
+  wrapper now sets `OPENCODE_CONTAINER_CONFIG_DIR=/opencode-home/.config/opencode`
+  in every session; the host value is never forwarded.
+
+### Setup acceptance
+
+| Check | Result |
+| --- | --- |
+| Shared copy | `setup/`, `tests/test_setup.py` and `tests/test_alignment.py` from `sandbox-ref-5`; `diff -r` against the tag: no differences |
+| `tests/test_reference_copy.py` (on the host, with the sibling checkout at the tag) | Passed: 5 tests; an injected byte change in `setup/common.py` is reported |
+| `bash tests/run-runtime.sh --setup` (shared `test_setup.py`) | Passed: 63 tests |
+| `tests/test_alignment.py` | Passed: 9 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests. Covered: provider setup with CA trust and the `openrouter` method; a managed `--version` from a fresh environment, through the guard and the diagnostics filter; the shell smoke check; a failed candidate update rolled back; an offline rerun; a relocated managed command; unrestricted setup and shell. Disposable `HOME`, installation and proxy image; no systemd change, credentials or model request |
+| Provider setup transcript | Driven through a real pseudo-terminal with the acceptance harness, a disposable `HOME` and the `openrouter` method with no key set. Observed, in order: the residual-exfiltration notice, listing every method's host, with its required acknowledgement; `protected profile: openrouter-api`; the maintenance warning and authorization; `Sandbox qualification: locally-qualified`; `Sandbox: ready`; `Authentication pending. Supply OPENROUTER_API_KEY ...`; `Authentication: pending` |
+| Real systemd user-service activation, real API-key requests | Unavailable (not exercised) |
+
+### Final verification (task 4.3)
+
+| Check | Result |
+| --- | --- |
+| `bash -n`, ShellCheck | Passed, no findings |
+| `--wrapper` | Passed: 53 tests, including the setup entry point, the setup-required message, the diagnostics filter, the session configuration variable and the isolated-state order |
+| `--shared` (includes `test_alignment.py` and `test_reference_copy.py`) | Passed: 142 tests, 27 skipped (run by the modes) |
+| `--setup` | Passed: 63 tests |
+| `--setup-runtime` | Passed: 2 tests |
+| `--qualification` | Passed: 18 tests |
+| default (unrestricted runtime suite) | Passed: 19 tests |
+| `--network` | Passed: 21 tests |
+| markdownlint | Only line-length (MD013) and list-spacing (MD032) findings, as in the existing documents |
+| `openspec validate add-container-setup --strict`, `git diff --check` | Valid, clean |
+
+No container, volume or test image labeled for `io.opencode-container` remained after the runs.

@@ -40,6 +40,10 @@ Sessions SHALL use `HOME=/opencode-home` with the four XDG bases below it. Witho
 - **THEN** that directory is validated like the other state and mounted at `/opencode-home/.config/opencode`, while the data, cache and state directories keep their fixed paths
 - **AND** a relative value fails before engine queries, naming the variable
 
+#### Scenario: Session names the effective configuration directory
+- **WHEN** any session starts, with or without a host `OPENCODE_CONTAINER_CONFIG_DIR`
+- **THEN** the session has `OPENCODE_CONTAINER_CONFIG_DIR=/opencode-home/.config/opencode` and the host value is not forwarded
+
 ### Requirement: Physical bind paths and integration boundaries
 The wrapper SHALL preserve physical absolute workspace and state bind sources, support spaces and commas without argument splitting, and start in the original physical working directory. Only the workspace, four OpenCode state directories, and explicitly enabled service socket SHALL be host-writable. Opted-in `.agents` and `/etc/opencode` mounts MUST be read-only.
 
@@ -232,7 +236,7 @@ Before starting the application, each launch SHALL inspect the created container
 - **AND** a process count beyond the process limit fails inside the session
 
 ### Requirement: Isolated persistent state option
-`OPENCODE_CONTAINER_STATE_DIR` SHALL select a private host directory mounted read/write as the persistent `/opencode-home`, replacing the shared state for that session. The wrapper SHALL create and validate it with the same rules as the shared state before any engine query, without repairing permissions or importing credentials. It SHALL NOT overlap the workspace mount. It SHALL conflict with a nonempty `OPENCODE_CONTAINER_CONFIG_DIR`. An empty value SHALL select shared state, like an unset one.
+`OPENCODE_CONTAINER_STATE_DIR` SHALL select a private host directory mounted read/write as the persistent `/opencode-home`, replacing the shared state. The wrapper SHALL check it lexically before engine queries, then create and validate it like shared state before image operations, without repairing permissions or importing credentials. It SHALL NOT overlap the workspace mount and SHALL conflict with a nonempty `OPENCODE_CONTAINER_CONFIG_DIR`; an empty value selects shared state.
 
 #### Scenario: Isolated state selected
 - **WHEN** `OPENCODE_CONTAINER_STATE_DIR` names a missing absolute directory
@@ -241,7 +245,8 @@ Before starting the application, each launch SHALL inspect the created container
 
 #### Scenario: Insecure or overlapping state directory
 - **WHEN** the selected directory is relative, belongs to another user, has group or other permissions, or equals, contains or lies inside the workspace mount
-- **THEN** the wrapper exits with status 1 naming the variable and path, before any engine query, and changes nothing
+- **THEN** the wrapper exits with status 1 naming the variable and path, before any image operation, and changes nothing
+- **AND** a relative or overlapping path fails before any engine query
 
 #### Scenario: State persists
 - **WHEN** a file is written below `/opencode-home` in one session with the same state directory
@@ -254,6 +259,10 @@ Before starting the application, each launch SHALL inspect the created container
 #### Scenario: Empty value selects shared state
 - **WHEN** `OPENCODE_CONTAINER_STATE_DIR` is set to an empty value
 - **THEN** the session uses the shared state layout, as with an unset variable
+
+#### Scenario: Engine query fails
+- **WHEN** a missing isolated state directory is selected and the engine query fails
+- **THEN** the wrapper exits without creating the directory
 
 ### Requirement: Hardening controls are documented
 Wrapper help and the README SHALL document the budget variables with defaults and accepted formats, the lifetime variable, the state directory option, the unsafe-workspace override with the refused directories, and that capabilities are dropped in every mode. They SHALL state that budgets and tmpfs sizes do not bound workspace or state storage growth. Help SHALL remain free of engine queries and state creation.

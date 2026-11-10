@@ -13,19 +13,24 @@
 
 ## Shared and agent-specific files
 
-`network/`, `setup/diagnostics.py` and the shared tests (`sandbox_profile.py`,
-`test_agent_profile.py`, `test_network_policy.py`, `test_mux.py`,
+`network/`, `setup/` and the shared tests listed in `tests/test_alignment.py`
+(`sandbox_profile.py`, `test_alignment.py`, `test_setup.py`, `test_agent_profile.py`, `test_network_policy.py`, `test_mux.py`,
 `test_tls_client_hello.py`, `test_tls_proxy.py`, `test_platform.py`,
 `test_qualification.py`, `test_guard.py`, `test_session.py`,
 `test_network_feasibility.py` and their fixtures) are copied unchanged from
-`claude-container` at tag `sandbox-ref-3`. Never edit them here, and never add
+`claude-container` at tag `sandbox-ref-5`. Never edit them here, and never add
 an agent identifier (`opencode`, `anthropic`, `openai`, `openrouter`) to them.
 Fix a defect in `claude-container` first, then copy the files again and update
 the manifest in `tests/test_reference_copy.py`. OpenCode values come only from:
 - `agent/`, the wrapper, `Containerfile` and `.containerignore`;
 - the per-agent tests: `test_wrapper.py`, `test_runtime.py`,
-  `test_network_runtime.py`, `network_tls_fixture.py`, `test_image_pins.py`,
-  `test_reference_copy.py` and `run-runtime.sh`.
+  `test_network_runtime.py`, `network_tls_fixture.py`, `test_setup_runtime.py`,
+  `test_image_pins.py`, `test_reference_copy.py` and `run-runtime.sh`.
+
+`tests/test_alignment.py` enforces the identifier scan and wrapper/profile
+consistency; `tests/test_reference_copy.py` enforces byte identity with the tag.
+New users run `bash ./opencode-container.sh --container-setup`
+(`docs/setup.md`).
 
 ## Build, Test, and Development Commands
 
@@ -64,6 +69,8 @@ Run the suites through `tests/run-runtime.sh`, which uses private native Linux s
 ```bash
 bash tests/run-runtime.sh --wrapper   # wrapper contracts, fake engine
 bash tests/run-runtime.sh --shared    # shared suites from claude-container
+bash tests/run-runtime.sh --setup     # shared setup suite
+bash tests/run-runtime.sh --setup-runtime  # guided setup with real rootless Podman
 bash tests/run-runtime.sh             # unrestricted runtime suite
 bash tests/run-runtime.sh --network   # restricted modes, real rootless Podman
 bash tests/run-runtime.sh --guard     # guard fixtures (toolchain image required)
@@ -94,7 +101,7 @@ Use concise imperative subjects. Keep commits focused. PRs should explain behavi
 - Keep the root filesystem read-only. Only the workspace and OpenCode state directories are host-writable. `.agents` and `/etc/opencode` are read-only mounts only on exact `OPENCODE_CONTAINER_AGENTS_DIR=1` / `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`; never mount `~/.claude` or another agent's state.
 - Keep `/tmp` as an ephemeral `tmpfs` with `nosuid,nodev`, but never add `noexec`: OpenTUI extracts a shared library there and loads it at startup.
 - Keep `--cap-drop=all`, `no-new-privileges`, the pinned image inputs and by-name forwarding; never add `--privileged` or add a capability back.
-- Validate `OPENCODE_CONTAINER_MEMORY_LIMIT` (4g), `OPENCODE_CONTAINER_CPU_LIMIT` (2), `OPENCODE_CONTAINER_PIDS_LIMIT` (512) and `OPENCODE_CONTAINER_RUN_TIMEOUT` before engine queries with the Claude `sandbox-ref-3` rules and messages; inspect the created container and start it only when the configured budgets match; print the lifetime notice while keeping the client status.
+- Validate `OPENCODE_CONTAINER_MEMORY_LIMIT` (4g), `OPENCODE_CONTAINER_CPU_LIMIT` (2), `OPENCODE_CONTAINER_PIDS_LIMIT` (512) and `OPENCODE_CONTAINER_RUN_TIMEOUT` before engine queries with the Claude `sandbox-ref-5` rules and messages; inspect the created container and start it only when the configured budgets match; print the lifetime notice while keeping the client status.
 - Refuse a workspace or worktree parent that physically is `/`, a system directory, `/tmp`, the physical home or a `/mnt/<letter>` drive root, before engine queries or state creation, unless exactly `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1`, which warns.
 - Do not replace existing containers. Names are `<sanitized-workspace-basename>-N`, where `N` is one greater than the highest existing suffix; reserve names atomically with `podman create`.
 - One generic image (`OPENCODE_CONTAINER_IMAGE`, default `localhost/opencode-cli:latest`); the numeric identity is set only at launch with `--userns=keep-id --user UID:GID`. `OPENCODE_CONTAINER_VERSION` and `OPENCODE_VERSION` are ignored with a warning.

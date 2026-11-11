@@ -309,7 +309,8 @@ is empty, so installations report `locally-qualified`, never `release-measured`.
 Restricted sessions receive no host proxy or CA variables. The relay sets the
 proxy, and `NO_PROXY=localhost,127.0.0.1,::1` keeps OpenTUI's connection to its
 local OpenCode server direct. Named Unix sockets, host services and LSP or
-plugin downloads are unavailable. `opencode run`, its tools and the TUI were
+plugin downloads are unavailable (see [Plugins and network
+modes](#plugins-and-network-modes)). `opencode run`, its tools and the TUI were
 verified under the guard; see [the validation record](docs/validation.md).
 
 ### Provider mode
@@ -344,6 +345,45 @@ forwarding. Writable configuration cannot re-enable these features. The
 bundled model catalog stays available. The background install of
 `@opencode-ai/plugin` has no control: the proxy denies it, and OpenCode only
 logs a warning.
+
+### Plugins and network modes
+
+Plugins need `unrestricted` mode. OpenCode installs every plugin named in its
+configuration from `registry.npmjs.org` when a session starts. No profile allows
+that host, and none will: it would let the agent download and publish arbitrary
+packages. In `provider` and `offline` mode, a configuration that names plugins
+can stall the session at startup without showing the TUI. The sanitized
+diagnostics printed when the session ends then list `policy-denied` entries for
+`registry.npmjs.org:443`.
+
+Shared state mounts the host `~/.config/opencode`, so plugins configured for a
+host installation of OpenCode also reach restricted sessions. On 2026-11-11, an
+operator's earlier host configuration stalled provider mode in this way. A
+fresh state started normally.
+
+If you use plugins, manage the switch between modes yourself, and keep a
+separate state for each:
+
+- **Restricted sessions** (`provider`, `offline`) use a configuration without
+  plugins: the shared state, or an isolated one.
+- **Plugin sessions** use `unrestricted` with their own isolated state. That
+  state holds the plugin configuration and the installed packages.
+
+Exported variables override the managed launcher's saved choices for one
+launch only. For example:
+
+```bash
+OPENCODE_CONTAINER_NETWORK=unrestricted \
+OPENCODE_CONTAINER_STATE_DIR="$HOME/.local/state/opencode-container-plugins" \
+  opencode-container
+```
+
+Authenticate once in each isolated state with `opencode auth login`;
+credentials are not copied between states. Unrestricted sessions have no egress
+filtering, and plugins run with the agent's authority. Do not add plugins to the
+state used by restricted sessions, or their next start stalls again. To find an
+offending plugin, look for `plugin` entries in `opencode.json` and for a
+`package.json` in the configuration directory.
 
 Limits:
 - **Residual exfiltration.** The proxy binds the CONNECT host to the TLS server

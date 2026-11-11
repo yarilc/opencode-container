@@ -595,3 +595,27 @@ unaffected: its methods keep their current setup behavior.
 | --- | --- |
 | `bash tests/run-runtime.sh --shared` | Passed: 145 tests, 27 skipped (run by the modes) |
 | `bash tests/run-runtime.sh --setup` | Passed: 65 tests |
+
+## Adoption of `sandbox-ref-10`: 2026-11-11
+
+Copied from `claude-container` tag `sandbox-ref-10` (commit `0f6585f`):
+
+- `network/agent_profile.py`, `setup/common.py`, `setup/setup.py`;
+- `tests/test_agent_profile.py`, `tests/test_setup.py`.
+
+The `tests/test_reference_copy.py` manifest moved to the tag.
+`agent/profile.json` sets `native.private_shared_dirs: true`: the wrapper
+already refuses non-private shared directories, and setup now refuses them too,
+before image work. A failed setup smoke launch also shows the wrapper's
+sanitized stderr. The profile is part of the qualified code identity, so
+existing installations requalify on their next setup.
+
+| Check | Result |
+| --- | --- |
+| `bash tests/run-runtime.sh --shared` | Passed: 146 tests, 27 skipped (run by the modes) |
+| `bash tests/run-runtime.sh --setup` | Passed: 68 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 53 tests |
+
+A first run of all wrappers' suites was interrupted by a host crash. Its
+leftover test containers were removed before this run.

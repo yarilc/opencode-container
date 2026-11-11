@@ -265,7 +265,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-9`; see
+unchanged from its tag `sandbox-ref-10`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -463,6 +463,11 @@ Linux storage when WSL/DrvFS does not enforce Unix modes. Symlinked state
 directories and differently named symlink targets are resolved physically before
 they are mounted at the fixed session paths. Conflicting mount destinations are
 rejected.
+
+Guided setup applies the same rule to all four shared directories
+(`native.private_shared_dirs: true` in `agent/profile.json`). It stops before
+image work, and the refusal names the path, the reason and, for a mode such as
+`755` left by a host OpenCode installation, the fix `chmod 700 <path>`.
 
 ### Isolated state
 

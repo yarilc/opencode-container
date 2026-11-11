@@ -20,7 +20,8 @@
     "config_dir_env": "OPENCODE_CONTAINER_CONFIG_DIR",
     "approval_bypass_env": "OPENCODE_CONTAINER_YOLO",
     "config_home": ".config/opencode",
-    "shared_dirs": [".local/share/opencode", ".cache/opencode", ".local/state/opencode"]
+    "shared_dirs": [".local/share/opencode", ".cache/opencode", ".local/state/opencode"],
+    "private_shared_dirs": true
   },
   "auth": {
     "anthropic": {

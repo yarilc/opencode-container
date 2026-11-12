@@ -743,7 +743,7 @@ OpenTUI. The requirement "Terminal-compatible device mounts" is replaced by
 | `tests/test_wrapper.py` | Passed: 59 tests. With the previous launcher, the updated assertions fail (15 failures) |
 | `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 338 tests, 71 skipped (the runtime tests are opt-in) |
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 20 tests, including `test_opentui_renderer`, `test_tools_without_capabilities` and `test_pseudo_terminals_and_device_masks`. `test_runtime.py` always uses `localhost/opencode-cli:latest`, so that tag was assigned temporarily to `45ae34976eb9` and removed afterwards |
-| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Passed (operator-reported, 2026-11-12) on all three hosts |
 
 Qualification digests the launcher, so restricted installations rerun
 `--container-setup`. The runtime image is unchanged.

@@ -718,3 +718,32 @@ shared code digests change, so restricted installations rerun qualification.
 | `bash tests/run-runtime.sh --network` | Passed: 21 tests |
 | Runtime image used | `localhost/opencode-cli:adopt-ref-11` (`45ae34976eb9`), the current recipe |
 | Operator `--container-setup` on the hosts in use | Pending |
+
+## Engine-provided `/dev` for pseudo-terminals: 2026-11-12
+
+Change `use-engine-dev-for-pseudo-terminals`, launcher only, as in the Claude
+reference (claude-container `docs/validation.md`, same title) and Codex. No
+shared file changes.
+
+OpenCode and shell containers no longer mount their own `/dev` tmpfs or
+`devpts`. The explicit `devpts` from `sandbox-ref-11` took the kernel
+defaults `mode=600,ptmxmode=000`, so no process in a session could open a
+pseudo-terminal ("out of pty devices"). The terminal itself attached,
+because the engine allocates the console outside that `devpts`. The engine's
+`devpts` is `mode=620,ptmxmode=666`. On Podman 5, `/dev` is now the engine's
+writable tmpfs without `noexec`. OpenCode's `/tmp` was already executable for
+OpenTUI. The requirement "Terminal-compatible device mounts" is replaced by
+"Engine-provided device mounts allow pseudo-terminals".
+
+| Check | Result |
+| --- | --- |
+| Image `localhost/opencode-cli:adopt-ref-11` (`45ae34976eb9`) with the previous `/dev` arguments | `pty.openpty()`: "out of pty devices" |
+| `test_pseudo_terminals_and_device_masks` (new) with the previous launcher | Failed: "out of pty devices" |
+| `test_pseudo_terminals_and_device_masks` with the fix | Passed |
+| `tests/test_wrapper.py` | Passed: 59 tests. With the previous launcher, the updated assertions fail (15 failures) |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 338 tests, 71 skipped (the runtime tests are opt-in) |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 20 tests, including `test_opentui_renderer`, `test_tools_without_capabilities` and `test_pseudo_terminals_and_device_masks`. `test_runtime.py` always uses `localhost/opencode-cli:latest`, so that tag was assigned temporarily to `45ae34976eb9` and removed afterwards |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending |
+
+Qualification digests the launcher, so restricted installations rerun
+`--container-setup`. The runtime image is unchanged.

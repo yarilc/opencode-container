@@ -508,12 +508,14 @@ The main container runs with:
 - explicit ephemeral tmpfs mounts with `nosuid,nodev` and mode 1777:
   executable `/tmp` (512 MiB) for OpenTUI shared-library loading, noexec
   `/var/tmp` (512 MiB), and noexec `/run` (32 MiB);
-- its own `/dev` tmpfs (`nosuid,noexec`, mode 755, 64 MiB), an explicit
-  `devpts` at `/dev/pts` and an empty read-only `/dev/shm`. Podman 5 with
-  crun 1.27 cannot attach a terminal to a read-only `/dev`, so automatic
-  read-only tmpfs provisioning stays enabled and each of its targets is
-  overridden. `/dev` is writable but not executable, and tools that need
-  POSIX shared memory in `/dev/shm` are not supported;
+- the engine's `/dev` with a `devpts` at `/dev/pts` that allows
+  pseudo-terminals, and an empty read-only `/dev/shm`. Podman 5 with crun
+  1.27 cannot attach a terminal to a read-only `/dev`, so automatic
+  read-only tmpfs provisioning stays enabled. An explicit `devpts` mount
+  would get `ptmxmode=000`, and no pseudo-terminal could be opened. On
+  Podman 5, `/dev` is the engine's writable tmpfs, but no device can be
+  created without capabilities; on Podman 4.9 it stays read-only. Tools
+  that need POSIX shared memory in `/dev/shm` are not supported;
 - an empty read-only tmpfs at `/run/secrets`, which masks engine default mounts
   there (for example RHEL subscription certificates from `mounts.conf`);
 - memory, CPU and process budgets (see below).

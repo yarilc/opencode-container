@@ -451,9 +451,7 @@ class WrapperTests(unittest.TestCase):
         self.assertNotEqual(self.run_wrapper(cwd=invalid).returncode,0)
         self.assert_no_images()
 
-    DEVICE_MOUNTS = ('/dev:rw,nosuid,noexec,mode=755,size=65536k',
-                     'type=devpts,destination=/dev/pts',
-                     'type=tmpfs,destination=/dev/shm,ro=true',
+    DEVICE_MOUNTS = ('type=tmpfs,destination=/dev/shm,ro=true',
                      'type=tmpfs,destination=/run/secrets,ro=true')
 
     def assert_device_and_secret_mounts(self, args):
@@ -462,6 +460,11 @@ class WrapperTests(unittest.TestCase):
         mounts = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg in ('--tmpfs', '--mount')]
         for mount in self.DEVICE_MOUNTS:
             self.assertEqual(mounts.count(mount), 1, mount)
+        # The engine provides /dev and a devpts that allows pseudo-terminals; an
+        # explicit devpts would get ptmxmode=000.
+        self.assertFalse(any(m == '/dev' or m.startswith('/dev:') or 'type=devpts' in m
+                             or m.endswith('destination=/dev') or 'destination=/dev,' in m
+                             for m in mounts), mounts)
         # OpenCode temporary storage keeps its own policy: executable /tmp for OpenTUI.
         for mount in ('/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m',
                       '/run:rw,nosuid,nodev,noexec,mode=1777,size=32m',
@@ -488,7 +491,6 @@ class WrapperTests(unittest.TestCase):
                          ['/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m',
                           '/run:rw,nosuid,nodev,noexec,mode=1777,size=32m',
                           '/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m',
-                          '/dev:rw,nosuid,noexec,mode=755,size=65536k',
                           '/opencode-home:rw,exec,nosuid,nodev,mode=1777,size=512m'])
         self.assertIn('OPENAI_API_KEY',create); self.assertIn('OPENCODE_SERVER_PASSWORD',create)
         self.assertNotIn('UNLISTED_SECRET',create); self.assertNotIn('ANTHROPIC_API_KEY',create)

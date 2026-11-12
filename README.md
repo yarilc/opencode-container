@@ -229,8 +229,10 @@ OpenRouter, AWS, Azure and GitHub variable.
 - Launching from your home directory or a drive root such as `/mnt/d` is now
   refused; launch from a project directory or set exact
   `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1`.
-- Sessions now have memory and CPU budgets besides the process limit; hosts
-  need delegated rootless cgroup v2 `cpu`, `memory` and `pids` controllers.
+- Sessions now have memory and CPU budgets besides the process limit. Each
+  budget is enforced when the rootless engine delegates its cgroup v2
+  controller (`cpu`, `memory`, `pids`); see "Session hardening, budgets and
+  lifetime".
 - Session containers are now labeled `io.opencode-container.*`. Inspect current
   sessions with `podman ps --all --filter label=io.opencode-container.managed=true`
   and containers left by earlier releases with
@@ -265,7 +267,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-10`; see
+unchanged from its tag `sandbox-ref-11`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -506,7 +508,14 @@ The main container runs with:
 - explicit ephemeral tmpfs mounts with `nosuid,nodev` and mode 1777:
   executable `/tmp` (512 MiB) for OpenTUI shared-library loading, noexec
   `/var/tmp` (512 MiB), and noexec `/run` (32 MiB);
-- `--read-only-tmpfs=false` to disable automatic writable temporary mounts;
+- its own `/dev` tmpfs (`nosuid,noexec`, mode 755, 64 MiB), an explicit
+  `devpts` at `/dev/pts` and an empty read-only `/dev/shm`. Podman 5 with
+  crun 1.27 cannot attach a terminal to a read-only `/dev`, so automatic
+  read-only tmpfs provisioning stays enabled and each of its targets is
+  overridden. `/dev` is writable but not executable, and tools that need
+  POSIX shared memory in `/dev/shm` are not supported;
+- an empty read-only tmpfs at `/run/secrets`, which masks engine default mounts
+  there (for example RHEL subscription certificates from `mounts.conf`);
 - memory, CPU and process budgets (see below).
 
 ### Session hardening, budgets and lifetime
@@ -520,12 +529,21 @@ The main container runs with:
 | `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE` | unset | exactly `1` permits a refused workspace |
 
 Only an unset budget selects its default; no value disables a budget. Invalid
-values stop with status 1 before any engine query or state creation. After
-creating the container the wrapper inspects it and starts it only when the
-configured memory, CPU and process limits equal the selected budgets; otherwise
-it removes its own container and names rootless cgroup v2 `cpu`/`memory`/`pids`
-controller delegation. Budgets and tmpfs sizes do not limit workspace or state
-storage growth.
+values stop with status 1 before any engine query or state creation. Each budget
+is enforced only when the rootless engine delegates its cgroup v2 controller
+(`memory`, `cpu`, `pids`), as reported by `podman info`
+(`Host.CgroupControllers`). A missing controller leaves that budget unenforced:
+the wrapper does not request it, prints a notice such as `opencode-container:
+agent CPU budget not enforced: cgroup controller cpu is not delegated to the
+rootless engine`, and continues without a question. Provider proxies follow the
+same rule for their 128-process and 256 MiB limits. Without the memory or
+process budget, a session can exhaust host memory or processes for your user.
+After creating the container the wrapper inspects it and starts it only when
+every enforced budget equals its selected value and no unenforced budget is
+present; otherwise it removes its own container and names the reported
+controllers. Restricted qualification records the enforced set, so a change in
+delegation requires requalification. Budgets and tmpfs sizes do not limit
+workspace or state storage growth.
 
 `OPENCODE_CONTAINER_RUN_TIMEOUT` sets Podman's native container lifetime. When
 it stops a session, the wrapper prints a notice and keeps the engine client's
@@ -590,6 +608,14 @@ image digest; `tests/test_image_pins.py` rejects floating inputs. To update:
 
 Do not run `opencode upgrade` inside the container: the main filesystem is
 immutable and automatic updates are disabled.
+
+Image preparation fetches Debian packages over verified HTTPS only and needs
+outbound HTTPS (443) to the Debian, npm and container registries, not port 80.
+With host CA trust enabled, the selected bundle is also passed to the build as
+the `build-ca` secret, so the package fetches verify on TLS-intercepting
+networks; it is never stored in a layer. The recipe creates the working
+directory `/workspace` in the image, so the engine never creates or chowns it
+when a container starts (this fails for large domain UIDs under `keep-id`).
 
 ## Session lifecycle
 

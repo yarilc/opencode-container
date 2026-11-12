@@ -696,3 +696,25 @@ query and derives the fake inspection from the create arguments. In
 Every restricted installation must rebuild and rerun setup or qualification.
 The qualification identity, the shared code digests and the runtime image
 identity all change.
+
+## Adoption of `sandbox-ref-12`: 2026-11-12
+
+Copied from `claude-container` tag `sandbox-ref-12` (commit `fd196c9`): `network/qualification_records.py`, `network/qualify.py`, `tests/test_qualification.py`, `tests/test_setup.py`.
+The `tests/test_reference_copy.py` manifest moved to the tag.
+
+The gate containers and the security-identity probe now pass `--workdir /`.
+The shared runtime-build test pins `runtime_build: recipe`. OpenCode already
+creates `/workspace` in its image, so no observed behavior changes. The
+shared code digests change, so restricted installations rerun qualification.
+
+| Check | Result |
+| --- | --- |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 337 tests, 70 skipped |
+| `bash tests/run-runtime.sh --shared` | Passed: 159 tests, 28 skipped |
+| `bash tests/run-runtime.sh --setup` | Passed: 71 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` | Passed: 27 tests |
+| `bash tests/run-runtime.sh --guard` | Passed: 20 tests, 1 skipped (the 305-second idle check) |
+| `bash tests/run-runtime.sh --network` | Passed: 21 tests |
+| Runtime image used | `localhost/opencode-cli:adopt-ref-11` (`45ae34976eb9`), the current recipe |
+| Operator `--container-setup` on the hosts in use | Pending |

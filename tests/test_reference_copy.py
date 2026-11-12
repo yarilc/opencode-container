@@ -15,8 +15,8 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-REFERENCE_TAG = 'sandbox-ref-11'
-REFERENCE_COMMIT = 'd17e86579db71000cc97400b90f9d1d1dffa5f6c'
+REFERENCE_TAG = 'sandbox-ref-12'
+REFERENCE_COMMIT = 'fd196c9de038ca3ba9cb1b5d8af43d28da9dccd5'
 SIBLING = ROOT.parent / 'claude-container'
 # Shared directories whose complete file set is fixed by the manifest.
 CLOSED_DIRECTORIES = ('network', 'setup')
@@ -41,9 +41,9 @@ MANIFEST = {
     'network/qualification_peer.py': 'eaea202213ca9466dd8c904732b8a635bcfd20dcbcfcd5fe0a031cb9dd4dca0c',
     'network/qualification_probe.py': '32cf37eb0f997e800776916e21fa73e4715ce94d35188bb102c47f8f9e263260',
     'network/qualification_proxy.py': 'fea115190b81f5c7bd4ddaa6be825e3a50d3c7cc44c0ae30b1e70d66f36d48ab',
-    'network/qualification_records.py': 'd0b88c42c712ff9bf4441a7242efa5b6d487b73b5ccadfca945559d12df2c9e7',
+    'network/qualification_records.py': '9c352c68e48b857e060bfa052e801a365cb234c1d3e1d83f4a91c0e307189720',
     'network/qualification_runtime.py': 'a9395438a6ee7c3dcdcc74d366ca3f00b92c5c55c248687e25c96ac735b37ada',
-    'network/qualify.py': '51ed6a530bdc7a0122f0d768bab79dd14b84b845724e01bb8ac65fbd86336028',
+    'network/qualify.py': '6ac7e03aa1a243a1f43e5b86bbaf1e6998a828b6ee3c7d6e63ea2fa573200f94',
     'network/relay.py': '67f64f5a83994770f3bbac249d541f193dae3f494e20aa15a21cf2a44c0ce0ef',
     'network/release_acceptance.json': '50c7caa261f64c534af10d02d6420d5b08ffd20d1a8cc25a6321350bf186cefe',
     'network/resolv.conf': '8e40d95c29f83fe652b8a5d0dfda2ecfd94f9b51e0f406a517de1a3aa3fc6ad5',
@@ -72,9 +72,9 @@ MANIFEST = {
     'tests/test_network_feasibility.py': '4cff9c50b996fd38f2b21b75abe73de77531e554522b04641fcb5288178d1e1c',
     'tests/test_network_policy.py': '0f41877604a904904f5b4b27ba7386ca8629c260de9fbcbdfe60d2af0f0238a5',
     'tests/test_platform.py': 'e5e30cbb9edb3561e0a6cac67641ab27986ce9e6bd425e5be96976c39fb5fecf',
-    'tests/test_qualification.py': '5d116b3a8fbae5a402f1afa6ee09bb370e69ecaeaa5e6be30d3f64bfea3b43e0',
+    'tests/test_qualification.py': 'b194aedf57b26fad4b8b4f23e9e5e8c03a88a593318cf68616c8eae642eb9625',
     'tests/test_session.py': '047b1cefb75302ca833d13190c921e5767cbe322905835d3f2958bdaaec709e9',
-    'tests/test_setup.py': 'f6a6e5949e901f3f6534d4b2c6fbba3d1d830bca5d9c616b50ffe9ced601336a',
+    'tests/test_setup.py': '8436a333b1c42fc294ce9ae0b947171cbed8e179fcc59c9006c89c2b5c30d9e5',
     'tests/test_tls_client_hello.py': '7d8f889af0c4a8f6d40038bdbda915f3afa3adc08c47b5506a02180b595b7ccc',
     'tests/test_tls_proxy.py': '77f9dda900a8ee28ef76d018d862bd0475193f5b90840fd29005a04fe4403e83',
     'tests/tls_binding_fixture.py': '062fe63ec1fc8ad399199a5f5823515070d5d1fa4ac62607f8722a61347f3331',

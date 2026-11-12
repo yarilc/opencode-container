@@ -78,8 +78,11 @@ Environment:
   OPENCODE_CONTAINER_MEMORY_LIMIT session memory, integer with k/m/g unit (default: 4g)
   OPENCODE_CONTAINER_CPU_LIMIT    session CPUs, up to 3 decimals (default: 2)
   OPENCODE_CONTAINER_PIDS_LIMIT   session process limit (default: 512)
-                         Budgets cannot be disabled; they require delegated
-                         rootless cgroup v2 cpu/memory/pids controllers
+                         Budgets cannot be disabled; each is enforced only when
+                         the rootless engine delegates its cgroup v2 controller
+                         (memory, cpu, pids). A missing controller leaves that
+                         budget unenforced with a notice; without memory or
+                         process budgets a session can exhaust host resources
   OPENCODE_CONTAINER_RUN_TIMEOUT  session container lifetime in whole seconds
                          (default: 0, disabled by default)
   OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE exact 1 permits a refused sensitive
@@ -469,6 +472,42 @@ service_remote=${BASH_REMATCH[1]}
 runtime_info=$engine_response
 [[ "$service_remote" == false || "${CONTAINER_HOST:-}" == unix:///* ]] \
     || die 'remote launch engine requires explicit same-host Unix CONTAINER_HOST'
+
+# A budget is enforced only when the verified engine reports its cgroup v2
+# controller as delegated. Unenforced budgets are not requested, are announced,
+# and must be absent from the created configuration (see network/agent_budgets.py).
+capture_response cgroup_controllers podman info --format '{{.Host.CgroupControllers}}' \
+    || die 'cannot query the rootless cgroup controllers; check the Podman engine'
+cgroup_controllers=${cgroup_controllers%$'\n'}
+[[ "$cgroup_controllers" =~ ^\[([a-z_]+( [a-z_]+)*)?\]$ ]] \
+    || die 'unverifiable cgroup controller list from the Podman engine'
+controller_delegated() {
+    [[ " ${cgroup_controllers:1:${#cgroup_controllers}-2} " == *" $1 "* ]]
+}
+budget_args=()
+expected_memory=0
+expected_cpu=0
+pids_enforced=0
+if controller_delegated memory; then
+    budget_args+=("--memory=$memory_bytes")
+    expected_memory=$memory_bytes
+else
+    printf 'opencode-container: agent memory budget not enforced: cgroup controller memory is not delegated to the rootless engine\n' >&2
+fi
+if controller_delegated cpu; then
+    budget_args+=("--cpus=$cpu_text")
+    expected_cpu=$cpu_nano
+else
+    printf 'opencode-container: agent CPU budget not enforced: cgroup controller cpu is not delegated to the rootless engine\n' >&2
+fi
+if controller_delegated pids; then
+    budget_args+=("--pids-limit=$pids_limit")
+    pids_enforced=1
+else
+    # Override any containers.conf default that would request the missing controller.
+    budget_args+=(--pids-limit=-1)
+    printf 'opencode-container: agent process budget not enforced: cgroup controller pids is not delegated to the rootless engine\n' >&2
+fi
 if ((restricted)); then
     command -v python3 >/dev/null || die 'host Python 3 is required for restricted network policy validation'
     [[ "$service_remote" == true ]] \
@@ -502,6 +541,8 @@ if [[ "${OPENCODE_CONTAINER_PODMAN:-}" == 1 ]]; then
         --format '{{.Host.Security.Rootless}}{{"\n"}}{{.Host.RemoteSocket.Path}}' \
         || die 'cannot query selected Podman socket; check service, permissions and SELinux policy'
     socket_response=${socket_response%$'\n'}
+    # Podman 5 reports the service socket as a unix:// URL; earlier releases report the bare path.
+    [[ "$socket_response" != true$'\n'unix://* ]] || socket_response=true$'\n'${socket_response#true$'\n'unix://}
     [[ "$socket_response" != *$'\r'* && "$socket_response" == true$'\n'/* ]] \
         || die 'invalid rootless socket response'
     host_socket=${socket_response#*$'\n'}
@@ -634,13 +675,24 @@ if ((delegate)); then
 fi
 
 run_args=(
-    --rm --interactive --read-only --read-only-tmpfs=false
+    --rm --interactive --read-only
     --userns=keep-id --user "$USER_ID:$GROUP_ID"
     --cap-drop=all --security-opt=no-new-privileges
-    --memory="$memory_bytes" --cpus="$cpu_text" --pids-limit="$pids_limit"
+    "${budget_args[@]}"
     --tmpfs "/tmp:rw,exec,nosuid,nodev,mode=1777,size=512m"
     --tmpfs "/run:rw,nosuid,nodev,noexec,mode=1777,size=32m"
     --tmpfs "/var/tmp:rw,nosuid,nodev,noexec,mode=1777,size=512m"
+    # Mask engine default mounts at /run/secrets (RHEL subscription secrets from
+    # mounts.conf): Podman skips its own mount there, leaving an empty read-only
+    # tmpfs that the guard accepts and that exposes no host material.
+    --mount type=tmpfs,destination=/run/secrets,ro=true
+    # Podman forces /dev read-only with --read-only-tmpfs=false, and crun >= 1.27
+    # must replace /dev/console to attach a terminal. Keep automatic provisioning
+    # but override each of its targets: a noexec /dev, the devpts that a user /dev
+    # mount drops, and an empty read-only /dev/shm.
+    --tmpfs "/dev:rw,nosuid,noexec,mode=755,size=65536k"
+    --mount type=devpts,destination=/dev/pts
+    --mount type=tmpfs,destination=/dev/shm,ro=true
     "${home_args[@]}" "${mount_args[@]}" "${xdg_args[@]}"
     --env "HOME=$CONTAINER_HOME" --env "USER=$USER_NAME"
     --workdir "$WORKSPACE"
@@ -746,7 +798,11 @@ maintenance=0
 [[ "${OPENCODE_CONTAINER_MAINTENANCE:-}" != 1 ]] || maintenance=1
 build_current_image() {
     ((maintenance)) || die "image $IMAGE needs a build; prepare it with exact OPENCODE_CONTAINER_MAINTENANCE=1 (host pulls and build RUN steps are outside runtime filtering)"
-    podman build --tag "$IMAGE" --file "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR"
+    # The opted-in host CA bundle also verifies the build's package fetches. It
+    # is a build secret: mounted only for its RUN step and never stored in a layer.
+    local build_secret=()
+    [[ -z "$ca_bundle" ]] || build_secret=(--secret "id=build-ca,src=$ca_bundle")
+    podman build "${build_secret[@]}" --tag "$IMAGE" --file "$SCRIPT_DIR/Containerfile" "$SCRIPT_DIR"
 }
 if ((build_image)); then
     build_current_image
@@ -1058,12 +1114,21 @@ for ((attempt=0; attempt<20; attempt++)); do
 done
 [[ -n "$container_id" ]] || die 'cannot reserve container name after 20 confirmed collisions'
 # Engine flags alone are not evidence: require the created configuration to
-# carry every selected budget before the application starts.
+# carry every enforced budget and no unenforced one before the application starts.
 configured_budgets=$(timeout --kill-after=1s 10s podman inspect --type container \
     --format '{{.HostConfig.Memory}} {{.HostConfig.NanoCpus}} {{.HostConfig.PidsLimit}}' "$container_id") \
     || die 'cannot inspect session resource budgets; session not started'
-[[ "$configured_budgets" == "$memory_bytes $cpu_nano $pids_limit" ]] \
-    || die "session resource budgets were not applied (expected memory=$memory_bytes nano_cpus=$cpu_nano pids=$pids_limit); check rootless cgroup v2 cpu/memory/pids controller delegation; session not started"
+read -r configured_memory configured_cpu configured_pids extra <<< "$configured_budgets"
+budgets_applied=0
+if [[ -z "${extra:-}" && "$configured_budgets" != *$'\n'* && "$configured_memory" == "$expected_memory" && "$configured_cpu" == "$expected_cpu" ]]; then
+    if ((pids_enforced)); then
+        [[ "$configured_pids" == "$pids_limit" ]] && budgets_applied=1
+    else
+        [[ "$configured_pids" =~ ^(0|-1)$ ]] && budgets_applied=1
+    fi
+fi
+((budgets_applied)) \
+    || die "session resource budgets were not applied as expected (memory=$expected_memory nano_cpus=$expected_cpu pids=$( ((pids_enforced)) && printf '%s' "$pids_limit" || printf 'unenforced')); engine reports controllers $cgroup_controllers; check rootless cgroup v2 controller delegation; session not started"
 started_at=$SECONDS
 # Explicit redirection keeps Bash from replacing background-client stdin.
 if [[ -f "$SCRIPT_DIR/setup/diagnostics.py" ]] && command -v python3 >/dev/null; then

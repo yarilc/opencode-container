@@ -98,7 +98,7 @@
 
 ## 6. Validation and publication
 
-- [ ] 6.1 Run the full unit discovery on executable, private, native
+- [x] 6.1 Run the full unit discovery on executable, private, native
   temporary storage. Verify that there are no failures, apart from known
   timing-sensitive tests that pass on a rerun, which are recorded as such.
 - [x] 6.2 With the image from 4.2, run `bash tests/run-runtime.sh` with

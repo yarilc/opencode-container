@@ -689,7 +689,9 @@ query and derives the fake inspection from the create arguments. In
 | Runtime image `localhost/opencode-cli:adopt-ref-11` | Built with the wrapper's build arguments. Image `45ae34976eb9`. Debian sources `https://`, no `/tmp/apt-bootstrap-ca.pem`, `ca-certificates` installed, OpenCode `1.18.3`, OpenSpec `1.16.0`. `/workspace` is in the exported layer (root, 755, build time 08:23), and a `keep-id` container without `--workdir` at 08:24 leaves it unchanged |
 | `bash -n opencode-container.sh`, `git diff --check`, `openspec validate adopt-lab-host-fixes --strict` | Passed, clean, valid |
 | Parity table | SHA-256 `893682205ada6457060a60b3a7cacc48ec8fbc8c78db8422a38344846047cf86`, identical to claude-container and Codex |
-| Operator `--container-setup` (refresh approved) and a session on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending: the operator runs them after the push |
+| Operator `--container-setup` and session tests on the Rocky Linux 9 lab host, provider profile `opencode-zen` | Passed (operator-reported, 2026-11-12) |
+| Operator `--container-setup` and session tests on the newer WSL host, provider profile `opencode-zen` | Passed (operator-reported, 2026-11-12) |
+| Operator `--container-setup` and a session on this host | Pending |
 
 Every restricted installation must rebuild and rerun setup or qualification.
 The qualification identity, the shared code digests and the runtime image

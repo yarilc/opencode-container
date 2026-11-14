@@ -848,7 +848,7 @@ to standard error. The launcher and the wrapper tests are therefore unchanged.
 | `bash tests/run-runtime.sh --wrapper` | Passed: 65 tests |
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
 | Five-wrapper parity table | Identical to claude-container's (`sandbox-ref-17`) |
-| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Passed (operator-reported, 2026-11-14); `main` pushed |
 
 Runtime image: setup image `d671ac84156f`. It was tagged
 `localhost/opencode-cli:latest` only for the runs and untagged by name

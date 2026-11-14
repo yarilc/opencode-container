@@ -39,7 +39,7 @@ Intentional differences are limited to per-agent files:
 | --- | --- |
 | `agent/profile.json` | Identity: `opencode-container`, prefix `OPENCODE_CONTAINER`, labels `io.opencode-container.*`. Images: `localhost/opencode-cli`, `localhost/opencode-egress`, `localhost/opencode-guard-toolchain`. Runtime: home `/opencode-home`, command `opencode`. State: configuration `.config/opencode` with override `OPENCODE_CONTAINER_CONFIG_DIR`, plus shared `.local/share/opencode`, `.cache/opencode` and `.local/state/opencode`. Approval: `OPENCODE_CONTAINER_YOLO`. Four API-key methods |
 | `agent/policies/default.json` | `anthropic-api`, `openai-api`, `openrouter-api` and `opencode-zen`, revision `opencode-2026-11-10-v1` |
-| `opencode-container.sh` | OpenCode arguments; fixed shared state paths or isolated state; executable `/tmp` and `/opencode-home`; protected `OPENCODE_DISABLE_*` values; profile-selected credential; no host proxy or CA variables in restricted modes; missing-mode message without setup |
+| `opencode-container.sh` | OpenCode arguments; fixed shared state paths or isolated state; executable `/tmp` and `/opencode-home`; protected `OPENCODE_DISABLE_*` values; toolchain variables filtered (`OPENCODE_*`, provider variables) and set before forwarding; profile-selected credential; no host proxy or CA variables in restricted modes; missing-mode message without setup |
 | `Containerfile`, `.containerignore` | OpenCode image; copies `network/relay.py` and `network/mux.py` |
 | `tests/test_wrapper.py`, `test_runtime.py`, `test_network_runtime.py`, `network_tls_fixture.py`, `run-runtime.sh`, `test_image_pins.py`, `test_reference_copy.py` | OpenCode names, synthetic OpenAI-compatible Chat Completions fixture, provider host inventories |
 
@@ -105,7 +105,9 @@ have no profile and are unsupported in restricted modes.
 
 Restricted sessions set `OPENCODE_DISABLE_AUTOUPDATE`, `..._DEFAULT_PLUGINS`,
 `..._LSP_DOWNLOAD`, `..._MODELS_FETCH` and `..._SHARE` to `1` after
-forwarding. As measured on 1.18.3, these values win over `opencode.json`
+forwarding and after the toolchain variables. A toolchain cannot set any
+`OPENCODE_` or provider variable: the launcher leaves it out with a warning.
+As measured on 1.18.3, these values win over `opencode.json`
 (`autoupdate`, `share: "auto"`). Two requests have no control:
 - the background install of `@opencode-ai/plugin` into each configuration directory;
 - an explicit `opencode upgrade`.

@@ -54,12 +54,16 @@ else
     selection=(-v "${shared[@]/#/tests.}")
     runtime_environment=()
 fi
+# Wrapper fixtures need private, executable temporary storage: the runner's
+# /tmp is world-writable, and the toolchain library refuses such ancestors.
 podman run --rm --interactive --label io.opencode-container.acceptance=runner \
     --userns=keep-id --user "$(id -u):$(id -g)" \
     --volume "$project_root:$project_root:$project_mode" \
     --volume "$native_root:$native_root:rw" \
     --volume "$host_socket:/run/podman/podman.sock:rw" \
     --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777 \
+    --mount type=tmpfs,destination=/sandbox-test-tmp,tmpfs-mode=0700,U=true,tmpfs-size=1g \
+    --env SANDBOX_TEST_TMPDIR=/sandbox-test-tmp \
     --workdir "$project_root" \
     --env HOME=/tmp \
     --env CONTAINER_HOST=unix:///run/podman/podman.sock \

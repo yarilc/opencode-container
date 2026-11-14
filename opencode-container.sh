@@ -17,6 +17,8 @@ Container options:
                          arguments are omitted)
   --container-git-worktree mount the parent of the current physical directory
                          read/write; the container starts in the current directory
+  --container-toolchain  manage the shared read-only toolchain library; must be first:
+                         add <recipe.json> | list | remove <name> | verify [<name>]
   --container-help       show this wrapper help without engine or state changes
 
 All other arguments, including --help, are passed to OpenCode unchanged.
@@ -87,6 +89,10 @@ Environment:
                          (default: 0, disabled by default)
   OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE exact 1 permits a refused sensitive
                          workspace with a warning (default: disabled)
+  OPENCODE_CONTAINER_TOOLCHAINS 0, false, or no omits the read-only /toolchains
+                         library mount (default: mounted)
+  OPENCODE_CONTAINER_TOOLCHAINS_DIR toolchain library shared by the wrappers (default:
+                         ${XDG_DATA_HOME:-~/.local/share}/sandbox-toolchains)
 
 Values are forwarded by name and never placed in engine arguments.
 ~/.claude is never mounted. GitHub tokens are never forwarded by default.
@@ -154,6 +160,13 @@ die() { printf 'opencode-container: %s\n' "$*" >&2; exit 1; }
 for arg in "$@"; do
     [[ "$arg" != --container-help ]] || { usage; exit 0; }
 done
+# Toolchain management runs on the host and never starts a session.
+if [[ "${1:-}" == --container-toolchain ]]; then
+    [[ "${2:-}" != launch-env ]] || die 'usage: --container-toolchain add <recipe.json> | list | remove <name> | verify [<name>]'
+    command -v python3 >/dev/null || die 'host Python 3 is required for the toolchain library'
+    toolchain_script=$(readlink -f -- "${BASH_SOURCE[0]}")
+    exec python3 -I "$(dirname -- "$toolchain_script")/setup/toolchains.py" "${@:2}"
+fi
 for arg in "$@"; do
     if [[ "$arg" == --container-qualify ]]; then
         [[ $# == 1 ]] || die '--container-qualify must be used alone'
@@ -186,6 +199,7 @@ for arg in "$@"; do
         --container-build) build_image=1 ;;
         --container-shell) shell_mode=1 ;;
         --container-git-worktree) git_worktree=1 ;;
+        --container-toolchain) die '--container-toolchain must be the first argument' ;;
         *) agent_args+=("$arg") ;;
     esac
 done
@@ -219,6 +233,12 @@ case "${OPENCODE_CONTAINER_TRUST_HOST_CA:-}" in
     [Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1) trust_host_ca=1 ;;
     ''|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) ;;
     *) die 'OPENCODE_CONTAINER_TRUST_HOST_CA must be 0, 1, true, false, yes, or no' ;;
+esac
+toolchains_enabled=0
+case "${OPENCODE_CONTAINER_TOOLCHAINS:-1}" in
+    [Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|1) toolchains_enabled=1 ;;
+    0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]) ;;
+    *) die 'OPENCODE_CONTAINER_TOOLCHAINS must be 0, 1, true, false, yes, or no' ;;
 esac
 config_override=${OPENCODE_CONTAINER_CONFIG_DIR:-}
 if [[ -n "$config_override" ]]; then
@@ -649,6 +669,32 @@ else
     shared_state .cache/opencode "$HOME/.cache/opencode"
     shared_state .local/state/opencode "$HOME/.local/state/opencode"
 fi
+# The operator's toolchain library is mounted read-only; the shared module
+# checks it stays private and outside every writable mount and the installation,
+# and lists the default toolchains verified for this runtime recipe.
+toolchain_library=''
+toolchain_path=''
+toolchain_env=()
+if ((toolchains_enabled && ! qualification_probe)); then
+    command -v python3 >/dev/null \
+        || die 'host Python 3 is required for the toolchain library; set OPENCODE_CONTAINER_TOOLCHAINS=0 to omit it'
+    toolchain_avoid=(--avoid "$workspace_mount")
+    for state_path in "${writable_state[@]}"; do
+        toolchain_avoid+=(--avoid "$state_path")
+    done
+    toolchain_output=$(python3 -I "$SCRIPT_DIR/setup/toolchains.py" launch-env "${toolchain_avoid[@]}") \
+        || die 'toolchain library check failed; set OPENCODE_CONTAINER_TOOLCHAINS=0 to start without it'
+    while IFS=$'\t' read -r toolchain_kind toolchain_first toolchain_second; do
+        case "$toolchain_kind" in
+            library) toolchain_library=$toolchain_first ;;
+            path) toolchain_path+=":$toolchain_first" ;;
+            env) toolchain_env+=(--env "$toolchain_first=$toolchain_second") ;;
+            *) die 'unexpected toolchain library output' ;;
+        esac
+    done <<<"$toolchain_output"
+    [[ "$toolchain_library" == /* ]] || die 'toolchain library check returned no library'
+fi
+
 ca_bundle=''
 if ((trust_host_ca)); then
     if [[ -n "${OPENCODE_CONTAINER_CA_BUNDLE:-}" ]]; then
@@ -768,6 +814,7 @@ guard_digest=''
 if ((restricted)); then
     network_inputs=(--installation "$SCRIPT_DIR" --writable "$workspace_mount"
         --mount-target "$workspace_mount" --mount-target "$CONTAINER_HOME")
+    [[ -z "$toolchain_library" ]] || network_inputs+=(--mount-target /toolchains)
     for state_path in "${writable_state[@]}"; do
         network_inputs+=(--writable "$state_path")
     done
@@ -833,6 +880,23 @@ if ((restricted)); then
         || die 'cannot resolve restricted runtime image identity'
     session_image=${session_image%$'\n'}
     [[ "$session_image" =~ ^(sha256:)?[a-f0-9]{64}$ ]] || die 'invalid restricted runtime image identity'
+fi
+# The library is mounted read-only; default toolchain entries follow the image
+# PATH, so they never replace the runtime's own node or python3, and env.sh puts
+# a toolchain first explicitly.
+if [[ -n "$toolchain_library" ]]; then
+    run_args+=(--volume "$toolchain_library:/toolchains:ro,nosuid,nodev")
+    if [[ -n "$toolchain_path" ]]; then
+        capture_response image_environment podman image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$session_image" \
+            || die 'cannot inspect the runtime image environment'
+        image_path=''
+        while IFS= read -r image_variable; do
+            [[ "$image_variable" != PATH=* ]] || { image_path=${image_variable#PATH=}; break; }
+        done <<<"$image_environment"
+        [[ -n "$image_path" ]] || image_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        toolchain_env=(--env "PATH=$image_path$toolchain_path" "${toolchain_env[@]}")
+    fi
+    run_args+=("${toolchain_env[@]}")
 fi
 
 # Lifecycle state belongs exclusively to this invocation.

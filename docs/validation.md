@@ -747,3 +747,72 @@ OpenTUI. The requirement "Terminal-compatible device mounts" is replaced by
 
 Qualification digests the launcher, so restricted installations rerun
 `--container-setup`. The runtime image is unchanged.
+
+## Adoption of `sandbox-ref-16` and the toolchain library (`adopt-sandbox-ref-16`): 2026-11-14
+
+Copied from `claude-container` tag `sandbox-ref-16` (commit `1fa091e`):
+`network/agent_profile.py`, `network/control.py`,
+`network/qualification_records.py`, `setup/common.py`,
+`tests/test_alignment.py`, `tests/test_qualification.py`,
+`setup/toolchains.py`, `tests/test_toolchains.py`.
+The `tests/test_reference_copy.py` manifest moved to the tag.
+
+Wrapper port of the reference toolchain library (claude-container
+`add-toolchain-library`, commit `e45957f`; Codex `adopt-sandbox-ref-14`):
+- `--container-toolchain add|list|remove|verify`, dispatched before the
+  network mode;
+- `OPENCODE_CONTAINER_TOOLCHAINS`, parsed like the other boolean settings, and
+  `OPENCODE_CONTAINER_TOOLCHAINS_DIR`;
+- the library checked against the workspace and every writable state
+  directory (the four shared OpenCode directories or the isolated
+  `OPENCODE_CONTAINER_STATE_DIR`) before any image or container operation;
+- the read-only `/toolchains` mount (`ro,nosuid,nodev`), with
+  `--mount-target /toolchains` in restricted modes;
+- default toolchain `PATH` entries appended after the image `PATH`.
+
+Since `sandbox-ref-15`, toolchains cannot set `XDG_` variables, so they never
+move OpenCode's state. The README has a "Toolchains" section with the
+`AGENTS.md` instruction line; the example recipes are linked in
+claude-container.
+
+A first apply of this change, on `sandbox-ref-15`, was discarded before any
+commit. A shared comment named OpenCode, and the agent-identifier scans
+failed on it. The reference fixed it in `sandbox-ref-16`.
+
+`tests/run-runtime.sh` mounts a private executable tmpfs at
+`/sandbox-test-tmp` as `SANDBOX_TEST_TMPDIR`, and `tests/test_wrapper.py`
+creates its fixtures there, as in the reference and Codex.
+
+Fixture adaptations required by the new mount:
+- `tests/test_wrapper.py`:
+  - an exposed home stops on the library overlap, and passes with
+    `OPENCODE_CONTAINER_TOOLCHAINS=0`;
+  - bare wrapper copies without `setup/` omit the library;
+  - the host-XDG test accepts that only the shared library follows
+    `XDG_DATA_HOME`;
+  - the isolated-state test accepts the library below the host home and a
+    third volume;
+  - the restricted fixture installs `setup/` and `Containerfile`.
+- `tests/test_network_runtime.py`: the synthetic installation gains
+  `setup/common.py`, `setup/toolchains.py` and `Containerfile`.
+
+| Check | Result |
+| --- | --- |
+| New `tests/test_wrapper.py` cases with the previous launcher | Failed as intended (dispatch, mount, private creation, unsafe library including shared and isolated state, disabled mount, appended `PATH`, restricted `--mount-target`, home workspace overlap) |
+| `python3 -m unittest tests.test_reference_copy tests.test_toolchains` (private tmpfs), including the agent-identifier scans | Passed |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 370 tests, 74 skipped |
+| `bash tests/run-runtime.sh --shared` | Passed: 160 tests, 28 skipped |
+| `bash tests/run-runtime.sh --setup` | Passed: 71 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` | Passed: 28 tests |
+| `bash tests/run-runtime.sh --guard` | Passed: 20 tests, 1 skipped |
+| `bash tests/run-runtime.sh --network` | Passed: 22 tests, including a toolchain added on the host during an offline session, usable without direct network |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 65 tests |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests, including archive and image sources, a failing check, the read-only mount, the image's `node` and `python3` kept first, the wrapper's `XDG_DATA_HOME` kept, and the omitted mount |
+| Five-wrapper parity table | Identical to claude-container's (`sandbox-ref-16`) |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host, `java -version` with the Temurin 21 toolchain, and `--container-toolchain verify java21` | Pending (operator) |
+
+Runtime image: setup image `d671ac84156f`, tagged `localhost/opencode-cli:latest`
+only for the runs and untagged by name afterwards (its setup tags remain).
+Qualification digests the launcher and `setup/toolchains.py`, so restricted
+installations rerun `--container-setup`.

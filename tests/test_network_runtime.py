@@ -53,7 +53,9 @@ class NetworkRuntime(unittest.TestCase):
         for source in list((ROOT / 'network').glob('*.py')) + [ROOT / 'network/resolv.conf']:
             shutil.copyfile(source, self.install / 'network' / source.name)
         (self.install / 'agent/policies').mkdir(mode=0o700, parents=True, exist_ok=True)
-        for name in ('agent/profile.json', 'agent/policies/default.json'):
+        (self.install / 'setup').mkdir(mode=0o700, exist_ok=True)
+        for name in ('agent/profile.json', 'agent/policies/default.json', 'setup/common.py', 'setup/toolchains.py',
+                     'Containerfile'):
             shutil.copyfile(ROOT / name, self.install / name)
         binary_dir = self.install / 'network/bin'
         binary_dir.mkdir(mode=0o700, exist_ok=True)
@@ -366,6 +368,48 @@ test "$(curl --fail --silent --show-error --max-time 10 https://localhost.locald
         self.assertTrue(ready, 'session readiness timed out')
         self.assertEqual(proc.stdout.readline().strip(), 'network-ready')
         return proc
+
+    def test_toolchain_added_during_offline_session_without_network(self):
+        # The library is a read-only directory bind: a toolchain the operator adds
+        # on the host appears in a running session, which keeps its restrictions.
+        import hashlib, io, tarfile
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w:gz') as archive:
+            for directory in ('live-1', 'live-1/bin'):
+                info = tarfile.TarInfo(directory)
+                info.type, info.mode = tarfile.DIRTYPE, 0o755
+                archive.addfile(info)
+            data = b'#!/bin/sh\necho live-tool\n'
+            info = tarfile.TarInfo('live-1/bin/live')
+            info.size, info.mode = len(data), 0o755
+            archive.addfile(info, io.BytesIO(data))
+        source = self.base / 'live.tar.gz'
+        source.write_bytes(buffer.getvalue())
+        recipe = self.base / 'live.json'
+        recipe.write_text(json.dumps({'schema': 1, 'name': 'live', 'version': '1', 'default': True, 'check': ['live'],
+                                      'source': {'archive': str(source), 'strip_components': 1,
+                                                 'sha256': hashlib.sha256(source.read_bytes()).hexdigest()}}))
+        self.ensure_qualification({})
+        proc = subprocess.Popen([str(self.wrapper), '--container-shell'], cwd=self.project, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        proc.stdin.write("""echo network-ready
+for attempt in $(seq 1 300); do test -f /toolchains/live/env.sh && break; sleep 0.2; done
+. /toolchains/live/env.sh && live
+if python3 -c 'import socket; socket.create_connection(("1.1.1.1", 443), timeout=3)' 2>/dev/null; then echo direct-network; fi
+exit 0
+""")
+        proc.stdin.flush()
+        ready, _, _ = select.select([proc.stdout], [], [], 60)
+        self.assertTrue(ready, 'session readiness timed out')
+        self.assertEqual(proc.stdout.readline().strip(), 'network-ready')
+        added = subprocess.run([str(self.wrapper), '--container-toolchain', 'add', str(recipe)], cwd=self.project,
+                               env=self.env, capture_output=True, text=True, timeout=300)
+        self.assert_success(added)
+        output, errors = proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 0, output + errors)
+        self.assertIn('live-tool', output)
+        self.assertNotIn('direct-network', output)
 
     def test_agent_budgets_are_effective_and_lifetime_cleans_owned_proxy(self):
         _, provider = self.provider_fixture()

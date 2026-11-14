@@ -123,6 +123,7 @@ Building the image, including the first build, needs exact
 | `--container-build` | rebuild the image from the pinned inputs (requires `OPENCODE_CONTAINER_MAINTENANCE=1`), then start the selected session |
 | `--container-shell` | bypass the OpenCode entrypoint and open `/bin/bash`, omitting all OpenCode arguments |
 | `--container-git-worktree` | expose the physical current directory's entire immediate parent read/write, retaining the original physical working directory and naming basename |
+| `--container-toolchain` | manage the shared read-only toolchain library; must be the first argument (see [Toolchains](#toolchains)) |
 | `--container-help` | wrapper help without engine or state side effects |
 
 Normal `--help` remains an OpenCode argument. Other OpenCode arguments keep
@@ -267,7 +268,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-12`; see
+unchanged from its tag `sandbox-ref-16`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -563,6 +564,124 @@ a warning; it relaxes no other check.
 The rootless Podman socket still gives OpenCode full control over the user's
 Podman engine. A process deliberately using the API can access host paths that
 the user can read. Leave session delegation disabled when it is unnecessary.
+
+## Toolchains
+
+Sessions can use extra toolchains, such as Java, Go or Python, without Podman
+access, an unrestricted network or a rebuilt image. The operator keeps a
+toolchain library on the host. Every session sees it read-only, with `nosuid`
+and `nodev`, at `/toolchains`. The library is shared by the Claude, Codex,
+OpenCode, Pi and Antigravity wrappers. A toolchain adds no network, IPC or
+privilege capability: it runs under the same restrictions as the rest of the
+session.
+
+- **Location:** `${XDG_DATA_HOME:-~/.local/share}/sandbox-toolchains`, or
+  `OPENCODE_CONTAINER_TOOLCHAINS_DIR`. Unlike OpenCode state, the library
+  follows the host `XDG_DATA_HOME`, so all wrappers find the same library. The
+  launcher creates it private (`0700`) when it is missing. It must stay
+  outside the workspace, the OpenCode state directories and the installation.
+  A home directory exposed as the workspace with
+  `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1` contains the default library, so
+  that launch stops. Move the library with `OPENCODE_CONTAINER_TOOLCHAINS_DIR`,
+  or omit it.
+- **Disable:** `OPENCODE_CONTAINER_TOOLCHAINS=0` (or `false`, `no`) starts a
+  session without the mount.
+- **Live updates:** a toolchain added or removed on the host appears in
+  running sessions without a restart.
+
+### Managing the library
+
+The operator runs these commands on the host; `--container-toolchain` must be
+the first argument:
+
+```bash
+opencode-container --container-toolchain add java21.json   # install or replace from a recipe
+opencode-container --container-toolchain list              # name, version, default, size, verified base
+opencode-container --container-toolchain remove java21
+opencode-container --container-toolchain verify [java21]   # rerun the checks on the current runtime image
+```
+
+- **Sources:** a toolchain is a relocatable directory tree, taken either from
+  a path inside an OCI image referenced by `@sha256:` digest, or from a local
+  archive with its SHA-256. The command never downloads archives.
+- **Pulls:** pulling a missing image requires exact
+  `OPENCODE_CONTAINER_MAINTENANCE=1`. Like image builds, the pull happens on
+  the host, outside runtime filtering.
+- **Extraction:** it rejects absolute paths, `..`, device nodes and links
+  that leave the toolchain, and clears setuid and setgid bits.
+- **Atomic changes:** changes take a library lock and replace directories
+  atomically.
+- **Check:** before accepting a toolchain, `add` runs the recipe's `check`
+  command in the OpenCode runtime image, without network and with the
+  session's identity and hardening. A toolchain that needs a newer C library
+  than the image's glibc fails here. The manifest records the base image from
+  the installed `Containerfile`. If that base changes, the toolchain stays
+  visible but loses its default environment until `verify` succeeds, and the
+  launcher prints one warning naming it. All five wrappers build from the
+  same base, so a toolchain verified by another wrapper keeps its default
+  environment here.
+
+### Recipes
+
+A recipe is a JSON file that the operator keeps and reviews:
+
+| Key | Meaning |
+| --- | --- |
+| `schema`, `name`, `version` | `1`; `[a-z0-9][a-z0-9._-]*`; free version text |
+| `source` | `{"image": "<ref>@sha256:<digest>", "path": "/abs/path"}` or `{"archive": "/abs/file.tar.xz", "sha256": "<hex>", "strip_components": 1}` |
+| `path` | directories relative to the toolchain, added to `PATH` (default `["bin"]`) |
+| `env` | variables: `{"toolchain": "<relative path>"}` or `{"value": "<literal>"}` |
+| `requires` | other toolchains whose environment is loaded first |
+| `notes` | short instructions shown to the agent in `toolchains.md` |
+| `check` | command run in the runtime image before the toolchain is accepted |
+| `default` | `true` adds the toolchain to new sessions' environment |
+
+- **Protected variables:** recipes cannot set `PATH`, `HOME`, loader, proxy,
+  CA, `OPENCODE_CONTAINER_*`, configuration or credential variables, or any
+  `XDG_` variable. OpenCode places its state with `XDG_CONFIG_HOME`,
+  `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`, so a toolchain can
+  never move it.
+- **Default toolchains:** in new sessions, their `PATH` entries come **after**
+  the image's. They never replace the runtime's own `node` or `python3`, which
+  OpenCode and the image tools use.
+- **Conflicts:** two default toolchains cannot share a command or a variable.
+  Install a second version with `"default": false` and use it through its
+  `env.sh`.
+- **Writable locations:** `/tmp` is writable and executable, `/var/tmp` and
+  `/run` are writable but `noexec`, and all three are discarded with the
+  container. In shared-state mode `/opencode-home` is an executable tmpfs, and
+  only the four OpenCode directories below it persist. Point caches to `/tmp`
+  with literal values. Recipes shared with other wrappers keep notes such as
+  `GOTMPDIR` under the workspace, because `/tmp` is `noexec` in some of them.
+- **Dependency downloads** (Maven, npm, pip, Cargo, Go modules) need network
+  access that provider and offline modes do not grant. Provide dependencies in
+  the workspace, or use an unrestricted session.
+
+The verified example recipes (Temurin 21, Maven 3.9, Go, Node.js 24,
+Python 3.13 and Rust) are kept in the reference repository, in
+[`claude-container/docs/toolchains/`](https://github.com/yarilc/claude-container/tree/main/docs/toolchains),
+with their versions, digests, checksums and usage notes in its
+[README "Toolchains" section](https://github.com/yarilc/claude-container#toolchains).
+They do not depend on the agent.
+
+### Telling the agent
+
+The wrapper never edits `AGENTS.md` or other instruction files. The library
+contains a generated `/toolchains/toolchains.md` with the usage rules and every
+installed toolchain, plus a machine-readable `/toolchains/index.json`. Add one
+line to the project's `AGENTS.md`, or to `~/.config/opencode/AGENTS.md`
+(`/opencode-home/.config/opencode/AGENTS.md` in the session):
+
+```markdown
+Read /toolchains/toolchains.md before using or looking for build tools.
+```
+
+The agent then runs a toolchain in one command with
+`. /toolchains/<name>/env.sh && <command>`. This form also works for
+toolchains added after the session started.
+
+SELinux and AppArmor enforcement were not tested with the library mount. On
+hosts that enforce them, profile the tools you add.
 
 ## Included Tools
 

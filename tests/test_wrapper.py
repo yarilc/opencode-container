@@ -6,6 +6,8 @@ from pathlib import Path
 import shutil
 import socket
 import signal
+import stat
+import sys
 import time
 import subprocess
 import tempfile
@@ -42,6 +44,8 @@ elif args[0] == 'info' and args[-1] == '{{.Host.CgroupControllers}}':
     print(os.environ.get('FAKE_CONTROLLERS', '[cpu memory pids]'))
 elif args[0] == 'version':
     print(os.environ.get('FAKE_SERVER_VERSION', '4.9.3'))
+elif args[:2] == ['image', 'inspect'] and any('.Config.Env' in a for a in args):
+    print(os.environ.get('FAKE_IMAGE_ENV', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'))
 elif args[:2] == ['image', 'inspect']:
     print(os.environ.get('FAKE_IMAGE_ID', 'd' * 64))
 elif args[:2] == ['image', 'exists'] and args[-1] == os.environ.get('FAKE_EGRESS_IMAGE', '-'):
@@ -170,7 +174,7 @@ elif args[0] == 'start':
 
 class WrapperTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-container-')
+        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-container-', dir=os.environ.get('SANDBOX_TEST_TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.bin = self.base / 'bin'
@@ -194,6 +198,7 @@ class WrapperTests(unittest.TestCase):
         self.socket.bind(str(self.socket_path))
         self.addCleanup(self.socket.close)
         self.env['OPENCODE_CONTAINER_PODMAN_SOCKET'] = str(self.socket_path)
+        self.library = self.base / 'home/.local/share/sandbox-toolchains'
 
     def run_wrapper(self, *args, cwd=None, mask=None, **env):
         return subprocess.run([str(getattr(self, 'wrapper', WRAPPER)), *args], cwd=cwd or self.project,
@@ -407,7 +412,10 @@ class WrapperTests(unittest.TestCase):
         result=self.run_wrapper(**{v: str(relocated/v.lower()) for v in
                                    ('XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_CACHE_HOME','XDG_STATE_HOME')})
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertFalse(relocated.exists())
+        # OpenCode state ignores host XDG variables; only the toolchain library,
+        # shared by every wrapper, follows XDG_DATA_HOME.
+        self.assertEqual([str(p.relative_to(relocated)) for p in relocated.rglob('*') if p.is_dir()],
+                         ['xdg_data_home','xdg_data_home/sandbox-toolchains'])
         home=self.base/'home'
         create=self.create()
         for relative in ('.config/opencode','.local/share/opencode','.cache/opencode','.local/state/opencode'):
@@ -709,9 +717,12 @@ class WrapperTests(unittest.TestCase):
         create=self.create()
         self.assertIn(f'{state}:/opencode-home:rw',create)
         self.assertFalse(any(a.startswith('/opencode-home:') for a in create))
-        self.assertFalse((self.base/'home').exists())
+        # Only the default toolchain library is created below the host home.
+        self.assertEqual([p.name for p in (self.base/'home/.local/share').iterdir()],['sandbox-toolchains'])
+        self.assertFalse((self.base/'home/.config').exists())
         volumes=[create[i+1] for i,v in enumerate(create) if v=='--volume']
-        self.assertEqual(len(volumes),2)
+        self.assertEqual(len(volumes),3)
+        self.assertIn(f'{self.library}:/toolchains:ro,nosuid,nodev',volumes)
         foreign=self.base/'shared'; foreign.mkdir(mode=0o755)
         cases=('relative/state',str(foreign),str(self.project),str(self.project/'state'),
                str(self.project.parent),'/bad:colon')
@@ -902,7 +913,13 @@ class WrapperTests(unittest.TestCase):
         for value in ('true','yes','01',''):
             result,_=refused(home,OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=value)
             self.assertEqual(result.returncode,1,result.stderr)
+        # An exposed home contains the default toolchain library, which must
+        # never be writable through the workspace: the launch stops first.
         result,_=refused(home,OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE='1')
+        self.assertEqual(result.returncode,1,result.stderr)
+        self.assertIn('overlaps '+str(home),result.stderr)
+        self.assertFalse(any(c[0] in ('create','build') for c in self.calls()))
+        result,_=refused(home,OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE='1',OPENCODE_CONTAINER_TOOLCHAINS='0')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('WARNING: sensitive workspace explicitly exposed read/write',result.stderr)
         self.log.unlink()
@@ -1161,6 +1178,112 @@ class WrapperTests(unittest.TestCase):
 
     # Restricted modes. Argument and lifecycle instrumentation only: the real
     # guard, platform and protected-path acceptance live in the runtime suites.
+    # Toolchain library
+
+    def volumes(self):
+        create = self.create()
+        return [create[i + 1] for i, a in enumerate(create) if a == '--volume']
+
+    def environment(self):
+        create = self.create()
+        return [create[i + 1] for i, a in enumerate(create) if a == '--env']
+
+    def test_toolchain_command_dispatch(self):
+        env = {k: v for k, v in self.env.items() if k != 'OPENCODE_CONTAINER_NETWORK'}
+        result = subprocess.run([str(WRAPPER), '--container-toolchain', 'list'], cwd=self.project, env=env,
+                                text=True, capture_output=True, timeout=25)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Toolchain library: ' + str(self.library), result.stdout)
+        self.assertIn('No toolchains are installed.', result.stdout)
+        self.assertEqual(self.calls(), [])
+        for args, message in ((('--version', '--container-toolchain', 'list'), 'must be the first argument'),
+                              (('--container-toolchain', 'launch-env'), 'usage'),
+                              (('--container-toolchain',), 'usage')):
+            with self.subTest(args=args):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(any(c[0] in ('create', 'build') for c in self.calls()))
+
+    def test_toolchain_library_created_private_and_mounted_read_only(self):
+        self.assertFalse(self.library.exists())
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(stat.S_IMODE(self.library.stat().st_mode), 0o700)
+        self.assertIn('No toolchains are installed', (self.library / 'toolchains.md').read_text())
+        self.assertIn(f'{self.library}:/toolchains:ro,nosuid,nodev', self.volumes())
+        self.assertFalse(any(e.startswith('PATH=') for e in self.environment()))
+
+    def test_unsafe_toolchain_library_stops_before_engine_operations(self):
+        self.library.mkdir(parents=True, mode=0o700)
+        os.chmod(self.library, 0o755)
+        shared = self.base / 'home/.local/share/opencode'
+        isolated = self.base / 'isolated'
+        cases = [({}, str(self.library))]
+        cases += [({'OPENCODE_CONTAINER_TOOLCHAINS_DIR': str(path)}, str(path))
+                  for path in (self.project / 'tools', self.base, shared / 'tools')]
+        cases.append(({'OPENCODE_CONTAINER_STATE_DIR': str(isolated),
+                       'OPENCODE_CONTAINER_TOOLCHAINS_DIR': str(isolated / 'tools')}, str(isolated / 'tools')))
+        for env, path in cases:
+            with self.subTest(env=env):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(path, result.stderr)
+                self.assertFalse(any(c[0] in ('create', 'build', 'image', 'pull') for c in self.calls()))
+
+    def test_toolchain_mount_can_be_disabled(self):
+        for value in ('0', 'false', 'no'):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(OPENCODE_CONTAINER_TOOLCHAINS=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(any(v.endswith(':/toolchains:ro,nosuid,nodev') for v in self.volumes()))
+                self.assertFalse(self.library.exists())
+        result = self.run_wrapper(OPENCODE_CONTAINER_TOOLCHAINS='maybe')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('OPENCODE_CONTAINER_TOOLCHAINS', result.stderr)
+
+    def test_default_toolchain_environment_is_appended(self):
+        sys.path.insert(0, str(ROOT / 'setup'))
+        import toolchains
+        base = toolchains.base_reference(ROOT)
+        self.library.mkdir(parents=True, mode=0o700)
+        entry = {'version': '1', 'default': True, 'commands': ['tool'], 'requires': [], 'notes': [],
+                 'check': ['tool'], 'source': {}}
+        index = {'schema': 1, 'toolchains': [
+            {**entry, 'name': 'current', 'path': ['/toolchains/current/bin'],
+             'env': {'CURRENT_HOME': '/toolchains/current'}, 'verified': {'base': base, 'date': '2026-11-13'}},
+            {**entry, 'name': 'stale', 'path': ['/toolchains/stale/bin'], 'env': {},
+             'verified': {'base': 'docker.io/library/other@sha256:' + 'e' * 64, 'date': '2026-11-13'}}]}
+        (self.library / 'index.json').write_text(json.dumps(index))
+        result = self.run_wrapper(FAKE_IMAGE_ENV='PATH=/usr/bin:/bin\nNODE_VERSION=22')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = self.environment()
+        self.assertIn('PATH=/usr/bin:/bin:/toolchains/current/bin', environment)
+        self.assertIn('CURRENT_HOME=/toolchains/current', environment)
+        self.assertFalse(any('/toolchains/stale' in e for e in environment))
+        # The wrapper's own XDG placement is kept.
+        self.assertIn('XDG_DATA_HOME=/opencode-home/.local/share', environment)
+        self.assertEqual(result.stderr.count('toolchain stale was verified on another base image'), 1)
+        self.assertIn('verify stale', result.stderr)
+
+    def test_restricted_sessions_declare_the_toolchain_mount(self):
+        values = self.restricted_fixture()
+        for mode in ('offline', 'provider'):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                result = self.run_wrapper(**(values | {'OPENCODE_CONTAINER_NETWORK': mode}))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                agent = next(c for c in self.calls() if c[0] == 'create'
+                             and not any(a.startswith('io.opencode-container.egress=') for a in c))
+                volumes = [agent[i + 1] for i, a in enumerate(agent) if a == '--volume']
+                self.assertIn(f'{self.library}:/toolchains:ro,nosuid,nodev', volumes)
+                control = [c for c in self.calls() if c[0] == 'control.py']
+                self.assertTrue(any(c[i:i + 2] == ['--mount-target', '/toolchains']
+                                    for c in control for i in range(len(c) - 1)), control)
+
     def restricted_fixture(self):
         install = self.base / 'install'
         (install / 'network/bin').mkdir(parents=True)
@@ -1172,7 +1295,8 @@ class WrapperTests(unittest.TestCase):
         guard.chmod(0o700)
         (guard.parent / 'sandbox-egress-guard.sha256').write_text('c' * 64 + '  sandbox-egress-guard\n')
         for name in ('network/session.py', 'network/agent_profile.py', 'network/agent_budgets.py', 'network/policy.py', 'network/revisions.py',
-                     'network/platform_check.py', 'network/proxy_hardening.py', 'agent/profile.json'):
+                     'network/platform_check.py', 'network/proxy_hardening.py', 'agent/profile.json',
+                     'setup/common.py', 'setup/toolchains.py', 'Containerfile'):
             (install / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, install / name)
         record = ("import json,os,pathlib,sys\n"
@@ -1396,7 +1520,7 @@ class WrapperTests(unittest.TestCase):
             'for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt',
             'for candidate in /missing/one.crt /missing/two.crt'))
         self.wrapper.chmod(0o755)
-        result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA='1')
+        result = self.run_wrapper(OPENCODE_CONTAINER_TRUST_HOST_CA='1', OPENCODE_CONTAINER_TOOLCHAINS='0')
         self.assertEqual(result.returncode, 1)
         self.assertIn('no default CA bundle found', result.stderr)
 
@@ -1611,7 +1735,8 @@ class WrapperTests(unittest.TestCase):
         self.wrapper = install / 'opencode-container.sh'
         shutil.copyfile(WRAPPER, self.wrapper)
         self.wrapper.chmod(0o755)
-        result = self.run_wrapper(FAKE_START_STDERR=restart)
+        # The bare copy has no setup/ module, so the toolchain library is omitted.
+        result = self.run_wrapper(FAKE_START_STDERR=restart, OPENCODE_CONTAINER_TOOLCHAINS='0')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('level=error msg="Should restart: false"', result.stderr)
     def test_session_names_the_effective_configuration_directory(self):

@@ -17,10 +17,12 @@
 (`sandbox_profile.py`, `test_alignment.py`, `test_setup.py`, `test_agent_profile.py`, `test_network_policy.py`, `test_mux.py`,
 `test_tls_client_hello.py`, `test_tls_proxy.py`, `test_platform.py`,
 `test_qualification.py`, `test_guard.py`, `test_session.py`,
-`test_network_feasibility.py` and their fixtures) are copied unchanged from
-`claude-container` at tag `sandbox-ref-12`. Never edit them here, and never add
+`test_network_feasibility.py`, `test_toolchains.py` and their fixtures) are copied unchanged from
+`claude-container` at tag `sandbox-ref-16`. Never edit them here, and never add
 an agent identifier (`opencode`, `anthropic`, `openai`, `openrouter`) to them.
-Fix a defect in `claude-container` first, then copy the files again and update
+The shared `setup/toolchains.py` manages the operator toolchain library, mounted
+read-only at `/toolchains`; the launcher owns only its dispatch, mount and
+environment. Fix a defect in `claude-container` first, then copy the files again and update
 the manifest in `tests/test_reference_copy.py`. OpenCode values come only from:
 - `agent/`, the wrapper, `Containerfile` and `.containerignore`;
 - the per-agent tests: `test_wrapper.py`, `test_runtime.py`,

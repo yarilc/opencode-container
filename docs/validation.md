@@ -810,7 +810,7 @@ Fixture adaptations required by the new mount:
 | `bash tests/run-runtime.sh --wrapper` | Passed: 65 tests |
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests, including archive and image sources, a failing check, the read-only mount, the image's `node` and `python3` kept first, the wrapper's `XDG_DATA_HOME` kept, and the omitted mount |
 | Five-wrapper parity table | Identical to claude-container's (`sandbox-ref-16`) |
-| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host, `java -version` with the Temurin 21 toolchain, and `--container-toolchain verify java21` | Pending (operator) |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host, `java -version` with the Temurin 21 toolchain, and `--container-toolchain verify java21` | Passed (operator-reported, 2026-11-14); `main` pushed |
 
 Runtime image: setup image `d671ac84156f`, tagged `localhost/opencode-cli:latest`
 only for the runs and untagged by name afterwards (its setup tags remain).

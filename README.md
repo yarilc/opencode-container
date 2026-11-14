@@ -268,7 +268,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-16`; see
+unchanged from its tag `sandbox-ref-17`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -636,11 +636,17 @@ A recipe is a JSON file that the operator keeps and reviews:
 | `check` | command run in the runtime image before the toolchain is accepted |
 | `default` | `true` adds the toolchain to new sessions' environment |
 
-- **Protected variables:** recipes cannot set `PATH`, `HOME`, loader, proxy,
-  CA, `OPENCODE_CONTAINER_*`, configuration or credential variables, or any
-  `XDG_` variable. OpenCode places its state with `XDG_CONFIG_HOME`,
+- **Protected variables:** recipes cannot set `PATH`, `HOME`, loader, proxy
+  or CA variables, any `XDG_` variable or `DBUS_SESSION_BUS_ADDRESS` (no
+  session has a bus). OpenCode places its state with `XDG_CONFIG_HOME`,
   `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`, so a toolchain can
-  never move it.
+  never move it. These rules are the same in every wrapper. Each wrapper also
+  protects its own variables: its prefix, configuration, approval and
+  credential variables, such as `OPENCODE_CONTAINER_*`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `OPENCODE_API_KEY` here. `add`
+  rejects them. If another wrapper installed a toolchain that sets one, this
+  wrapper leaves that variable out of its sessions and prints a warning
+  naming the toolchain; the rest of the toolchain stays available.
 - **Default toolchains:** in new sessions, their `PATH` entries come **after**
   the image's. They never replace the runtime's own `node` or `python3`, which
   OpenCode and the image tools use.

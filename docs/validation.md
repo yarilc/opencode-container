@@ -854,3 +854,38 @@ Runtime image: setup image `d671ac84156f`. It was tagged
 `localhost/opencode-cli:latest` only for the runs and untagged by name
 afterwards; its setup tags remain. `setup/toolchains.py` is qualified code,
 so restricted installations rerun `--container-setup`.
+
+## Toolchain variables cannot override the session (`protect-session-env-from-toolchains`): 2026-11-14
+
+Fixes finding H1 of the cross-wrapper review of 2026-11-14. The launcher
+appended the toolchain variables after the protected `OPENCODE_DISABLE_*=1`
+values and after the YOLO `OPENCODE_PERMISSION`, and Podman keeps the last
+`--env` for a name. A default toolchain in the shared library, possibly
+installed from another wrapper, could therefore re-enable optional traffic
+in restricted modes, grant every approval without YOLO through
+`OPENCODE_PERMISSION` or `OPENCODE_CONFIG_CONTENT`, or override a forwarded
+provider variable.
+
+The launcher now:
+- leaves out a toolchain variable that starts with `OPENCODE_` or is listed
+  in `ALL_PROFILE_NAMES`, with one warning per variable;
+- adds the remaining toolchain variables before forwarding, so forwarded
+  values, the protected values and YOLO come later and win. The toolchain
+  `PATH` entry keeps its place after image resolution.
+
+The new `test_toolchain_cannot_override_protected_variables` checks the
+final value of each name in restricted provider mode with and without YOLO,
+and in unrestricted mode with a forwarded `OPENAI_BASE_URL`. It fails on
+`main` (the toolchain's `0` and URL win) and passes on the branch.
+
+| Check | Result |
+| --- | --- |
+| `shellcheck opencode-container.sh` | Same two warnings as on `main` (SC2054, SC2154) |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 373 tests, 76 skipped |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 66 tests |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
+
+Runtime image: setup image `d671ac84156f`, tagged
+`localhost/opencode-cli:latest` only for the runs and untagged by name
+afterwards. No shared file changed, and qualification probes run without the
+toolchain mount, so no requalification is needed.

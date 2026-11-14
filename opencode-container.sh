@@ -688,7 +688,15 @@ if ((toolchains_enabled && ! qualification_probe)); then
         case "$toolchain_kind" in
             library) toolchain_library=$toolchain_first ;;
             path) toolchain_path+=":$toolchain_first" ;;
-            env) toolchain_env+=(--env "$toolchain_first=$toolchain_second") ;;
+            env)
+                # OpenCode's own controls and the provider variables belong to
+                # the wrapper and the operator, never to a shared toolchain.
+                if [[ "$toolchain_first" == OPENCODE_* || " $ALL_PROFILE_NAMES " == *" $toolchain_first "* ]]; then
+                    printf 'opencode-container: toolchain environment: skipping %s, which the wrapper protects\n' \
+                        "$toolchain_first" >&2
+                    continue
+                fi
+                toolchain_env+=(--env "$toolchain_first=$toolchain_second") ;;
             *) die 'unexpected toolchain library output' ;;
         esac
     done <<<"$toolchain_output"
@@ -745,6 +753,10 @@ run_args=(
     --label "io.opencode-container.workspace=$WORKSPACE"
     --label "io.opencode-container.workspace-name=$NAME_PREFIX"
 )
+
+# Toolchain variables come first: forwarded values and the protected literals
+# below are added later, and Podman keeps the last --env for a name.
+run_args+=("${toolchain_env[@]}")
 
 # Forward by name: base allowlist, selected provider profile, operator names.
 forwarded=' '
@@ -894,9 +906,8 @@ if [[ -n "$toolchain_library" ]]; then
             [[ "$image_variable" != PATH=* ]] || { image_path=${image_variable#PATH=}; break; }
         done <<<"$image_environment"
         [[ -n "$image_path" ]] || image_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-        toolchain_env=(--env "PATH=$image_path$toolchain_path" "${toolchain_env[@]}")
+        run_args+=(--env "PATH=$image_path$toolchain_path")
     fi
-    run_args+=("${toolchain_env[@]}")
 fi
 
 # Lifecycle state belongs exclusively to this invocation.

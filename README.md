@@ -647,6 +647,14 @@ A recipe is a JSON file that the operator keeps and reviews:
   rejects them. If another wrapper installed a toolchain that sets one, this
   wrapper leaves that variable out of its sessions and prints a warning
   naming the toolchain; the rest of the toolchain stays available.
+- **OpenCode and provider variables:** the launcher also leaves out any
+  toolchain variable that starts with `OPENCODE_` (for example
+  `OPENCODE_PERMISSION`, `OPENCODE_CONFIG_CONTENT` or `OPENCODE_DISABLE_*`)
+  or that is a provider variable such as `OPENAI_BASE_URL` or `AWS_REGION`,
+  with one warning per variable. Toolchain variables are set before the
+  forwarded variables and the protected values, so they never override them.
+  To pass a provider variable on purpose, forward it from the host with
+  `OPENCODE_CONTAINER_ENV_VARS`.
 - **Default toolchains:** in new sessions, their `PATH` entries come **after**
   the image's. They never replace the runtime's own `node` or `python3`, which
   OpenCode and the image tools use.

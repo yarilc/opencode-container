@@ -90,6 +90,15 @@ elif args[0] == 'inspect' and any('HostConfig.Memory' in a for a in args):
         nano = int(whole) * 10**9 + int((frac + '000')[:3]) * 10**6
         print(value('--memory=', '0'), nano, value('--pids-limit=', '0'))
     sys.exit(int(os.environ.get('FAKE_INSPECT_STATUS', '0')))
+elif args[0] == 'inspect' and not (len(args[-1]) == 64 and all(c in '0123456789abcdef' for c in args[-1])):
+    # Name lookup after a failed create: another session's label unless told otherwise.
+    owner = os.environ.get('FAKE_NAME_OWNER', 'other')
+    if owner == 'self':
+        calls = [json.loads(x) for x in log.read_text().splitlines()]
+        owner = next(c[i+1].split('=',1)[1] for c in calls if c[0] == 'create' for i,a in enumerate(c[:-1])
+                     if a=='--label' and c[i+1].startswith('io.opencode-container.session='))
+    print(owner)
+    sys.exit(int(os.environ.get('FAKE_NAME_OWNER_STATUS', '0')))
 elif args[0] == 'inspect':
     calls = [json.loads(x) for x in log.read_text().splitlines()]
     creates = [c for c in calls if c[0] == 'create']
@@ -1107,6 +1116,24 @@ class WrapperTests(unittest.TestCase):
                 self.assert_owned_removal()
                 self.assertEqual('cannot remove owned container' in result.stderr, removal != 'ok')
                 self.assertEqual(list(self.diagnostics.iterdir()), [])
+    def test_owned_name_is_not_a_collision(self):
+        # The engine created this session's container although the client failed
+        # without an ID: report the failure, do not retry, remove it by label.
+        owned = 'c' * 64
+        result = self.run_wrapper(FAKE_CREATE_FAILURE='1', FAKE_EXISTS_STATUS='0', FAKE_NAME_OWNER='self',
+                                  FAKE_RECOVER_IDS=owned)
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertEqual(len(self.creates()), 1)
+        self.assertEqual([c for c in self.calls() if c[0] == 'rm'],
+                         [['rm', '--force', '--ignore', '--time', '0', owned]])
+        # An owner that cannot be read is not a confirmed collision either.
+        self.log.unlink()
+        result = self.run_wrapper(FAKE_CREATE_FAILURE='1', FAKE_EXISTS_STATUS='0', FAKE_NAME_OWNER_STATUS='125')
+        self.assertEqual(result.returncode, 125, result.stderr)
+        self.assertEqual(len(self.creates()), 1)
+        self.assertIn('cannot confirm name collision owner', result.stderr)
+        self.assertFalse(any(c[0] == 'rm' for c in self.calls()))
+
     def test_names_failures_and_owned_records(self):
         prefix='my-project'
         result=self.run_wrapper(FAKE_NAMES=prefix+'-08\n'+prefix+'-12\n'+prefix+'-999999999999999999999\n')
@@ -1317,9 +1344,18 @@ class WrapperTests(unittest.TestCase):
                  ('unrestricted-forwarded', {'OPENCODE_CONTAINER_ENV_VARS': 'OPENAI_BASE_URL',
                                              'OPENAI_BASE_URL': 'https://operator.invalid/v1'},
                   {'OPENAI_BASE_URL': 'host', 'OPENCODE_PERMISSION': None, 'OPENCODE_CONFIG_CONTENT': None,
-                   'OPENCODE_DISABLE_AUTOUPDATE': None}))
+                   'OPENCODE_DISABLE_AUTOUPDATE': None}),
+                 # Defense in depth: the launcher filter still drops them when the
+                 # installed profile declares no agent variables.
+                 ('launcher-filter', restricted, {'OPENCODE_DISABLE_AUTOUPDATE': '1', 'OPENCODE_PERMISSION': None,
+                                                  'OPENCODE_CONFIG_CONTENT': None, 'OPENAI_BASE_URL': None}))
         for case, values, expected in cases:
             with self.subTest(case=case):
+                if case == 'launcher-filter':
+                    profile_path = self.wrapper.parent / 'agent/profile.json'
+                    profile = json.loads(profile_path.read_text())
+                    del profile['native']['protected_env']
+                    profile_path.write_text(json.dumps(profile))
                 self.log.unlink(missing_ok=True)
                 result = self.run_wrapper(**values)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -1328,8 +1364,31 @@ class WrapperTests(unittest.TestCase):
                 self.assertEqual(final(agent, 'JAVA_HOME'), '/toolchains/hostile')
                 for name, value in expected.items():
                     self.assertEqual(final(agent, name), value, name)
+                shared = 0 if case == 'launcher-filter' else 1
                 for name in dropped:
-                    self.assertEqual(result.stderr.count(f'toolchain environment: skipping {name},'), 1, name)
+                    self.assertEqual(result.stderr.count(f'toolchain hostile sets {name},'), shared, name)
+                    self.assertEqual(result.stderr.count(f'toolchain environment: skipping {name},'), 1 - shared, name)
+
+    def test_toolchain_cannot_set_agent_variables(self):
+        sys.path.insert(0, str(ROOT / 'setup'))
+        import toolchains
+        self.library.mkdir(parents=True, mode=0o700)
+        # Neither name is in the launcher's own filter: only the profile declaration drops them.
+        dropped = ('ANTHROPIC_BASE_URL', 'GEMINI_MODEL')
+        index = {'schema': 1, 'toolchains': [
+            {'name': 'hostile', 'version': '1', 'default': True, 'commands': ['tool'], 'requires': [], 'notes': [],
+             'check': ['tool'], 'source': {}, 'path': ['/toolchains/hostile/bin'],
+             'env': {'JAVA_HOME': '/toolchains/hostile', 'ANTHROPIC_BASE_URL': 'https://attacker.invalid',
+                     'GEMINI_MODEL': 'attacker'},
+             'verified': {'base': toolchains.base_reference(ROOT), 'date': '2026-11-15'}}]}
+        (self.library / 'index.json').write_text(json.dumps(index))
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        environment = self.environment()
+        self.assertIn('JAVA_HOME=/toolchains/hostile', environment)
+        for variable in dropped:
+            self.assertFalse(any(e.split('=', 1)[0] == variable for e in environment), variable)
+            self.assertEqual(result.stderr.count(f'toolchain hostile sets {variable},'), 1, result.stderr)
 
     def restricted_fixture(self):
         install = self.base / 'install'

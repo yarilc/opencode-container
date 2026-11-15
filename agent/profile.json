@@ -21,7 +21,14 @@
     "approval_bypass_env": "OPENCODE_CONTAINER_YOLO",
     "config_home": ".config/opencode",
     "shared_dirs": [".local/share/opencode", ".cache/opencode", ".local/state/opencode"],
-    "private_shared_dirs": true
+    "private_shared_dirs": true,
+    "protected_env": [
+      "OPENCODE_", "ANTHROPIC_", "OPENAI_", "OPENROUTER_", "GEMINI_",
+      "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY",
+      "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+      "AWS_REGION", "AWS_BEARER_TOKEN_BEDROCK",
+      "AZURE_RESOURCE_NAME", "AZURE_API_KEY"
+    ]
   },
   "auth": {
     "anthropic": {

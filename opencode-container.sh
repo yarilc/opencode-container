@@ -1181,7 +1181,19 @@ for ((attempt=0; attempt<20; attempt++)); do
     exists_status=0
     creation_lookup container exists "$name" || exists_status=$?
     case "$exists_status" in
-        0) creation_pending=0; next_index=$((next_index + 1)) ;;
+        0)
+            # Only another session's label is a collision; this session's own
+            # container stays pending, so cleanup recovers and removes it.
+            owner_status=0
+            creation_lookup inspect --type container --format "{{index .Config.Labels \"$ownership_label\"}}" "$name" \
+                || owner_status=$?
+            if ((owner_status != 0)); then
+                creation_pending=0
+                cleanup_warning "cannot confirm name collision owner (status $owner_status)"
+                exit "$create_status"
+            fi
+            [[ "$(<"$session_dir/lookup")" != "$session_token" ]] || exit "$create_status"
+            creation_pending=0; next_index=$((next_index + 1)) ;;
         1) creation_pending=0; exit "$create_status" ;;
         *) creation_pending=0; cleanup_warning "cannot confirm name collision (status $exists_status)"; exit "$create_status" ;;
     esac

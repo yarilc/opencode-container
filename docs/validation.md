@@ -939,7 +939,7 @@ inspection. The new tests (`test_toolchain_cannot_set_agent_variables`,
 | `bash tests/run-runtime.sh --wrapper` | Passed: 68 tests |
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
 | Five-wrapper parity table | Identical to claude-container's (`sandbox-ref-18`) |
-| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Passed (2026-11-15, reported by the operator after the push) |
 
 Runtime image: setup image `d671ac84156f`, tagged
 `localhost/opencode-cli:latest` only for the runs and untagged by name

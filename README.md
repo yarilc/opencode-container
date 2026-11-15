@@ -268,7 +268,7 @@ unrestricted networking.
 | `unrestricted` | Ordinary runtime networking, the previous behavior | Exact `OPENCODE_CONTAINER_PODMAN=1` |
 
 The restricted implementation is shared with `claude-container` and copied
-unchanged from its tag `sandbox-ref-17`; see
+unchanged from its tag `sandbox-ref-18`; see
 [docs/network-contract.md](docs/network-contract.md) and
 [network/README.md](network/README.md).
 
@@ -643,11 +643,17 @@ A recipe is a JSON file that the operator keeps and reviews:
   never move it. These rules are the same in every wrapper. Each wrapper also
   protects its own variables: its prefix, configuration, approval and
   credential variables, such as `OPENCODE_CONTAINER_*`, `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `OPENCODE_API_KEY` here. `add`
-  rejects them. If another wrapper installed a toolchain that sets one, this
-  wrapper leaves that variable out of its sessions and prints a warning
-  naming the toolchain; the rest of the toolchain stays available.
-- **OpenCode and provider variables:** the launcher also leaves out any
+  `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `OPENCODE_API_KEY` here, and
+  the agent's own variables that its profile lists in `native.protected_env`.
+  For OpenCode these are every `OPENCODE_`, `ANTHROPIC_`, `OPENAI_`,
+  `OPENROUTER_` and `GEMINI_` variable, `GOOGLE_API_KEY`,
+  `GOOGLE_GENERATIVE_AI_API_KEY`, the five `AWS_` Bedrock variables and
+  `AZURE_RESOURCE_NAME` and `AZURE_API_KEY`. `add` rejects them. If another
+  wrapper installed a toolchain that sets one, this wrapper leaves that
+  variable out of its sessions and prints a warning naming the toolchain;
+  the rest of the toolchain stays available.
+- **OpenCode and provider variables:** as a second layer, the launcher also
+  leaves out any
   toolchain variable that starts with `OPENCODE_` (for example
   `OPENCODE_PERMISSION`, `OPENCODE_CONFIG_CONTENT` or `OPENCODE_DISABLE_*`)
   or that is a provider variable such as `OPENAI_BASE_URL` or `AWS_REGION`,

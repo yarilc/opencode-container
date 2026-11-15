@@ -889,3 +889,59 @@ Runtime image: setup image `d671ac84156f`, tagged
 `localhost/opencode-cli:latest` only for the runs and untagged by name
 afterwards. No shared file changed, and qualification probes run without the
 toolchain mount, so no requalification is needed.
+
+## Adoption of `sandbox-ref-18`: 2026-11-15
+
+Copied from `claude-container` tag `sandbox-ref-18` (commit `958465b`):
+`network/agent_profile.py`, `setup/common.py`, `setup/toolchains.py`,
+`tests/test_agent_profile.py`, `tests/test_alignment.py`, `tests/test_setup.py`,
+`tests/test_toolchains.py`.
+The `tests/test_reference_copy.py` manifest moved to the tag.
+
+`sandbox-ref-18` adds the optional profile field `native.protected_env`, runs
+the toolchain check in `/`, refuses an isolated state directory that overlaps
+the workspace on managed launches, and makes the alignment test check the
+launcher's code and its help text separately. The shared tests passed
+without adapting an OpenCode fixture.
+
+OpenCode changes, from the cross-wrapper review of 2026-11-14:
+
+- **Agent variables:** `agent/profile.json` declares `OPENCODE_`,
+  `ANTHROPIC_`, `OPENAI_`, `OPENROUTER_`, `GEMINI_`, `GOOGLE_API_KEY`,
+  `GOOGLE_GENERATIVE_AI_API_KEY`, the five `AWS_` Bedrock variables,
+  `AZURE_RESOURCE_NAME` and `AZURE_API_KEY`. `launch-env` now leaves them out
+  with its own warning, including names the launcher filter does not cover,
+  such as `ANTHROPIC_BASE_URL` (H1 follow-up).
+- **Launcher filter kept:** the filter from `protect-session-env-from-toolchains`
+  stays as a second layer. With the declaration, `launch-env` drops these
+  variables first, so `test_toolchain_cannot_override_protected_variables`
+  now expects the shared warning, and a new `launcher-filter` case removes
+  `protected_env` from the installed profile to keep the launcher filter
+  covered.
+- **Name collisions (M2):** after a failed create without an ID, an existing
+  container with the candidate name is a collision only when its session
+  label differs. This session's own container stays pending, so the existing
+  label recovery in cleanup removes it, and the wrapper returns the create
+  status without retrying. An unreadable label is reported and not retried.
+
+The fake engine in `tests/test_wrapper.py` now answers the name-label
+inspection. The new tests (`test_toolchain_cannot_set_agent_variables`,
+`test_owned_name_is_not_a_collision`) fail on `main` and pass on the branch.
+
+| Check | Result |
+| --- | --- |
+| `shellcheck opencode-container.sh` | Same two warnings as on `main` (SC2054, SC2154) |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 379 tests, 76 skipped |
+| `bash tests/run-runtime.sh --shared` | Passed: 161 tests, 28 skipped |
+| `bash tests/run-runtime.sh --setup` | Passed: 72 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` (not in the tool's checklist; shared `setup/` modules are qualified code) | Passed: 28 tests |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 68 tests |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
+| Five-wrapper parity table | Identical to claude-container's (`sandbox-ref-18`) |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host | Pending |
+
+Runtime image: setup image `d671ac84156f`, tagged
+`localhost/opencode-cli:latest` only for the runs and untagged by name
+afterwards. Shared qualified code changes, so restricted installations rerun
+`--container-setup`.

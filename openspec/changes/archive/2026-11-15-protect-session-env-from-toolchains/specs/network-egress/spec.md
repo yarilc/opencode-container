@@ -10,7 +10,7 @@ Provider sessions SHALL disable these OpenCode features where the tested version
 - the remote model catalog fetch;
 - session sharing.
 
-The wrapper SHALL use protected environment values, set after forwarding and after toolchain variables, that writable OpenCode configuration, forwarded variables and toolchains cannot override. A missing disable control SHALL NOT broaden the allowlist. Shell and YOLO modes SHALL keep the same outer restrictions.
+The wrapper SHALL set protected environment values last, so writable OpenCode configuration, forwarded variables and toolchains cannot override them. A missing disable control SHALL NOT broaden the allowlist. Shell and YOLO modes SHALL keep the same outer restrictions.
 
 #### Scenario: Optional feature attempts outbound access
 - **WHEN** a disabled feature or writable setting attempts an update, plugin, LSP, catalog, share, telemetry or MCP request to an unapproved host

@@ -989,7 +989,7 @@ fix belongs to the reference and arrives with `sandbox-ref-21`.
 | `bash tests/run-runtime.sh --wrapper` | Passed: 69 tests |
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
 | `git diff --check`, `bash -n opencode-container.sh` | Passed |
-| Operator `--container-setup` on the three hosts | Pending (operator, after the `sandbox-ref-21` adoption) |
+| Operator `--container-setup` on the three hosts (`sandbox-ref-21`) | Passed (operator, 2026-11-16) |
 
 ## Adoption of `sandbox-ref-21`: 2026-11-16
 
@@ -1006,6 +1006,6 @@ Runtime image: `localhost/opencode-cli:setup-7604937c250c47628c5de0104612b917`; 
 | `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 397 tests, 74 skipped |
 | `bash tests/run-runtime.sh --guard` | Passed: 20 tests, 1 skipped |
 | `git diff --check` | Passed |
-| Operator `--container-setup` on the three hosts | Pending (operator, with the `sandbox-ref-20` adoption) |
+| Operator `--container-setup` on the three hosts (`sandbox-ref-21`) | Passed (operator, 2026-11-16) |
 
 Only shared test files changed: installations need no new setup for this tag.

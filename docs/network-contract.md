@@ -10,8 +10,8 @@ isolation, delegation, launcher and image specifications in `openspec/specs/`.
 
 ## Reference and intentional differences
 
-The shared components are copied unchanged from `claude-container` at tag
-`sandbox-ref-18` (commit `958465bcd220dbb6cc0fe0f233306cca1d58616c`):
+The shared components are copied unchanged from `sandbox-container` at tag
+`sandbox-ref-20` (commit `d4fd4ca88050e1090ba9898d161100d4de87815e`):
 
 - `network/` (except the build output `network/bin/`);
 - `setup/`;
@@ -29,7 +29,7 @@ found:
 on a changed, missing or extra file; the unchanged `tests/test_alignment.py`
 fails on a profile identifier (`opencode`, `anthropic`, `openai`,
 `openrouter`) in a shared file and checks the wrapper against the profile. A defect in a shared
-file is fixed in `claude-container` first and then copied; this repository
+file is fixed in `sandbox-container` first and then copied; this repository
 never carries a fork. [network/README.md](../network/README.md) is part of the
 copy and describes the shared mechanism in agent-neutral terms.
 
@@ -136,14 +136,15 @@ with a warning. Session sharing uses `opncd.ai`, which no profile allows.
 
 ## Five-wrapper parity
 
-The same OpenCode row appears in `claude-container` and `codex-container`.
+The same OpenCode row appears in `sandbox-container`, `claude-container`, `codex-container`, `antigravity-container` and `pi-container`.
 
 | Wrapper | Contract adoption | Implementation | Real enforcement | Auth compatibility |
 | --- | --- | --- | --- | --- |
-| Claude | Reference (`sandbox-ref-18`) | Mandatory bootstrap, multiplexed proxy and guided setup integrated | See the Claude validation record | Account login, reuse and refresh passed; operator session with tool use passed (2026-11-11, `anthropic-account`); real-key API unavailable |
-| Codex | Ported from `sandbox-ref-18`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-09) | Operator session with tool use passed (2026-11-11, `openai-account`); refresh and API-key checks pending; synthetic Responses API streaming and tool call passed |
-| Antigravity | Ported from `sandbox-ref-18`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated; keyring removed | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Operator session with tool use passed (2026-11-11, `google-account`, policy `antigravity-2026-11-11-v2`); refresh and Gemini API-key checks pending; synthetic Gemini streaming and tool call passed |
-| OpenCode | Ported from `sandbox-ref-18`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Operator session with tool use passed (2026-11-11, `anthropic-api`); the other three profiles pending; synthetic Chat Completions streaming and tool call passed |
+| Sandbox (reference) | Reference (`sandbox-ref-20`) | Guard, qualification and guided setup integrated; no provider mode (no authentication method); provider mechanics covered by the fixture profile | WSL ABI 3: all runner modes passed (2026-11-15) | Not applicable |
+| Claude | Ported from `sandbox-ref-20`; shared files unchanged | Mandatory bootstrap, multiplexed proxy and guided setup integrated | See the Claude validation record | Account login, reuse and refresh passed; operator session with tool use passed (2026-11-11, `anthropic-account`); real-key API unavailable |
+| Codex | Ported from `sandbox-ref-20`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-09) | Operator session with tool use passed (2026-11-11, `openai-account`); refresh and API-key checks pending; synthetic Responses API streaming and tool call passed |
+| Antigravity | Ported from `sandbox-ref-20`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated; keyring removed | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Operator session with tool use passed (2026-11-11, `google-account`, policy `antigravity-2026-11-11-v2`); refresh and Gemini API-key checks pending; synthetic Gemini streaming and tool call passed |
+| OpenCode | Ported from `sandbox-ref-20`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Operator session with tool use passed (2026-11-11, `anthropic-api`); the other three profiles pending; synthetic Chat Completions streaming and tool call passed |
 | Pi | Ported from `sandbox-ref-18`; shared files unchanged | Guard, multiplexed proxy, qualification and guided setup integrated | WSL ABI 3: all runtime modes and setup acceptance passed (2026-11-10) | Operator session with tool use passed (2026-11-11, `anthropic-api`); the other three profiles pending; synthetic Chat Completions streaming and tool call passed |
 
 ## Port status

@@ -945,3 +945,48 @@ Runtime image: setup image `d671ac84156f`, tagged
 `localhost/opencode-cli:latest` only for the runs and untagged by name
 afterwards. Shared qualified code changes, so restricted installations rerun
 `--container-setup`.
+
+## Adoption of `sandbox-ref-20`: 2026-11-16
+
+`sandbox-container` is now the reference (it replaced `claude-container`).
+Copied from `sandbox-container` tag `sandbox-ref-20` (commit `d4fd4ca`) with
+`tools/propagate.py`: `network/README.md`, `network/agent_profile.py`,
+`network/policy.py`, `network/qualification_records.py`, `network/qualify.py`,
+`network/session.py`, `setup/common.py`, `setup/setup.py`, `setup/toolchains.py`,
+`tests/sandbox_profile.py`, `tests/test_agent_profile.py`, `tests/test_alignment.py`,
+`tests/test_guard.py`, `tests/test_qualification.py`, `tests/test_session.py`,
+`tests/test_setup.py` and the fixture profiles in `tests/fixtures/`. The
+`tests/test_reference_copy.py` manifest moved to the tag and names
+`sandbox-container` as its sibling. Per-agent: `tests/test_setup_wrapper.py`
+(copied from Claude), the lifetime notice measured with a monotonic clock
+(`/proc/uptime`, since WSL2 steps the wall clock backwards) from just before
+container creation plus a boundary test (failed with the old launcher),
+documents pointing at `sandbox-container`, parity table fixed by hand.
+
+Runtime image: setup image `d671ac84156f`
+(`localhost/opencode-cli:setup-7604937c…`), tagged `localhost/opencode-cli:latest`
+only for the runs and untagged by name afterwards; WSL2 6.6.87.2, Podman 4.9.3.
+
+**Known shared defect:** in `--guard`,
+`test_production_filter_and_landlock_on_real_rootless_kernel` fails with
+`EROFS: read-only file system, mkdir '/opencode-home/.local'`. The shared
+`tests/test_guard.py` mounts the writable home of the fixture profile
+(`/fixture-home`) on the real image instead of the wrapper's home; OpenCode
+writes to its home at startup, the other wrappers' version commands do not.
+With `REAL_PROFILE.home` (temporary local change, reverted) the test passes. The
+fix belongs to the reference and arrives with `sandbox-ref-21`.
+
+| Check | Result |
+| --- | --- |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 397 tests, 74 skipped |
+| `bash tests/run-runtime.sh --setup` | Passed: 66 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` | Passed: 28 tests |
+| `bash tests/run-runtime.sh --guard` | 20 tests, 1 skipped: 1 failure, the shared defect above |
+| `bash tests/run-runtime.sh --network` | Passed: 22 tests |
+| `bash tests/run-runtime.sh --network-policy` | Passed: 15 tests |
+| `bash tests/run-runtime.sh --network-feasibility` | Passed: 1 test |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 69 tests |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
+| `git diff --check`, `bash -n opencode-container.sh` | Passed |
+| Operator `--container-setup` on the three hosts | Pending (operator, after the `sandbox-ref-21` adoption) |

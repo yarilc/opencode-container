@@ -1153,6 +1153,20 @@ while IFS= read -r existing_name; do
     numeric=$((10#$suffix))
     ((numeric < next_index)) || next_index=$((numeric + 1))
 done <<< "$names"
+# Measure the session from just before the container is created, so the
+# engine's lifetime limit cannot have started earlier, with a monotonic clock:
+# WSL2 steps the wall clock to resynchronise with the host, which moves
+# EPOCHREALTIME and SECONDS by seconds at a time, and whole-second SECONDS would
+# also report a short failing session crossing a second boundary as a reached
+# limit. /proc/uptime counts centiseconds since boot.
+elapsed_centiseconds() {
+    local now=''
+    read -r now _ 2>/dev/null </proc/uptime || now=''
+    now=${now//[!0-9]/}
+    [[ -n "$now" ]] || now=$((SECONDS * 100))
+    printf '%s' "$((10#$now - ${1:-0}))"
+}
+started_at=$(elapsed_centiseconds)
 for ((attempt=0; attempt<20; attempt++)); do
     name=$NAME_PREFIX-$next_index
     rm -f -- "$cid_file"
@@ -1215,7 +1229,6 @@ if [[ -z "${extra:-}" && "$configured_budgets" != *$'\n'* && "$configured_memory
 fi
 ((budgets_applied)) \
     || die "session resource budgets were not applied as expected (memory=$expected_memory nano_cpus=$expected_cpu pids=$( ((pids_enforced)) && printf '%s' "$pids_limit" || printf 'unenforced')); engine reports controllers $cgroup_controllers; check rootless cgroup v2 controller delegation; session not started"
-started_at=$SECONDS
 # Explicit redirection keeps Bash from replacing background-client stdin.
 if [[ -f "$SCRIPT_DIR/setup/diagnostics.py" ]] && command -v python3 >/dev/null; then
     # Optional for unrestricted installs without host Python. Only the exact
@@ -1235,7 +1248,7 @@ fi
 status=0
 wait "$client_pid" || status=$?
 client_pid=''
-if ((run_timeout > 0 && status != 0 && SECONDS - started_at >= run_timeout)); then
+if ((run_timeout > 0 && status != 0 && $(elapsed_centiseconds "$started_at") >= run_timeout * 100)); then
     printf 'opencode-container: session lifetime limit reached (%s s); exit status %s\n' "$run_timeout" "$status" >&2
 fi
 exit "$status"

@@ -990,3 +990,22 @@ fix belongs to the reference and arrives with `sandbox-ref-21`.
 | `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 22 tests |
 | `git diff --check`, `bash -n opencode-container.sh` | Passed |
 | Operator `--container-setup` on the three hosts | Pending (operator, after the `sandbox-ref-21` adoption) |
+
+## Adoption of `sandbox-ref-21`: 2026-11-16
+
+Copied from `sandbox-container` tag `sandbox-ref-21` (commit `4b25eae`) with
+`tools/propagate.py`: `tests/sandbox_profile.py`, `tests/test_guard.py`. The
+`tests/test_reference_copy.py` manifest moved to the tag; parity table fixed by
+hand. The shared guard runtime test now mounts the image's own native home
+(`AGENT_HOME`) instead of the fixture profile's home. It failed here under `sandbox-ref-20` (`EROFS` on `/opencode-home/.local`).
+
+Runtime image: `localhost/opencode-cli:setup-7604937c250c47628c5de0104612b917`; WSL2 6.6.87.2, Podman 4.9.3.
+
+| Check | Result |
+| --- | --- |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 397 tests, 74 skipped |
+| `bash tests/run-runtime.sh --guard` | Passed: 20 tests, 1 skipped |
+| `git diff --check` | Passed |
+| Operator `--container-setup` on the three hosts | Pending (operator, with the `sandbox-ref-20` adoption) |
+
+Only shared test files changed: installations need no new setup for this tag.

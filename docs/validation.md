@@ -1009,3 +1009,110 @@ Runtime image: `localhost/opencode-cli:setup-7604937c250c47628c5de0104612b917`; 
 | Operator `--container-setup` on the three hosts (`sandbox-ref-21`) | Passed (operator, 2026-11-16) |
 
 Only shared test files changed: installations need no new setup for this tag.
+
+## Adoption of `sandbox-ref-25`: 2026-11-18
+
+Change `adopt-sandbox-ref-25`: full adoption of the shared launcher core, from
+`sandbox-ref-21` straight to `sandbox-ref-25` (commit `6bed770`). Copied from
+`sandbox-container` with `tools/propagate.py`: `network/README.md`,
+`network/agent_profile.py`, `network/control.py`, `network/qualification_records.py`,
+`network/qualify.py`, `setup/common.py`, `setup/launch.py`, `setup/setup.py`,
+`tests/fixtures/agent/profile.json`, `tests/sandbox_profile.py`,
+`tests/test_agent_profile.py`, `tests/test_alignment.py`, `tests/test_network_policy.py`,
+`tests/test_qualification.py`, `tests/test_setup.py`, `launcher/core.sh`,
+`tests/fake_podman.py`, `tests/fixtures/agent/launcher.sh`,
+`tests/fixtures/shell-agent/launcher.sh`, `tests/test_launcher.py`. The
+`tests/test_reference_copy.py` manifest moved to the tag and lists `launcher` as
+a closed directory; the parity rows were copied from their repositories.
+
+- **Launcher:** `opencode-container.sh` is the reference entry script with the
+  wrapper name replaced; `opencode-wrapper` is deleted. `agent/launcher.sh` holds
+  OpenCode's profile values, `AGENT_EXEC=/usr/local/bin/opencode`,
+  `AGENT_EXEC_TMP=1`, one credential per policy profile, the fixed XDG bases
+  (reserved), the five `OPENCODE_DISABLE_*=1` switches for restricted sessions,
+  and five hooks: `agent_validate`, `agent_mounts`, `agent_environment`,
+  `agent_approval_bypass` and `agent_help`. `agent/profile.json` declares
+  `native.exec_tmp: true`.
+- **Build (U3, U8):** images carry `build-inputs-hash`; images prepared before
+  this change are refused as stale until rebuilt. `--container-build` without
+  OpenCode arguments builds and exits.
+- **Temporary storage (U7, L7):** `/tmp` and the shared-state home stay
+  executable 512 MiB tmpfs mounts, `/var/tmp` is `noexec`, `/run` (32 MiB) is
+  not writable by the session user.
+- **Dropped:** the version-variable notices, the shim, the extra
+  `io.opencode-container.*` labels, the credential notice (design decision 2)
+  and OpenCode's own toolchain filter (contract: redundant with
+  `setup/toolchains.py`).
+
+Old tests gate (design decision 4): the `sandbox-ref-21` `tests/test_wrapper.py`
+(69 cases) ran with its embedded fake engine against the new entry script and
+core, with only its harness adapted (the fake answers the core's
+`build-inputs-hash` label and its one-line socket query; synthetic installations
+copy the core, the agent part and the build inputs; removal arguments and tmpfs
+options are recorded in the old order). The first run found a defect in the
+agent part (an unset `OPENCODE_CONTAINER_YOLO` read under `set -u`), fixed before
+the classification. 31 cases then failed, each classified below. No lost
+behavior: two candidates (the create warning and the create umask) were
+classified as visible changes by the user (2026-11-18).
+
+| Old case | Outcome | Maps to |
+| --- | --- | --- |
+| `test_application_status_survives_cleanup_failure` | visible change | wording; status preserved (U9 cleanup report "cleanup rm failed or timed out") |
+| `test_budget_inspection_failures` | visible change | wording ("agent not started"); start still refused |
+| `test_creation_signals` | visible change | the old internal `error` file; the core keeps create diagnostics in its private session directory |
+| `test_deprecated_shim` | visible change | U2: `opencode-wrapper` removed (obsolete in the test map) |
+| `test_device_and_secret_mounts_in_every_unrestricted_mode` | visible change | L7: `/run` without mode 1777, not writable by the session user |
+| `test_exact_delegation_and_remapping` | visible change | phase 5 union (M6): `--unsetenv CONTAINER_CONNECTION` in every session |
+| `test_extra_environment_names` | visible change | a name listed twice is passed twice, by name, with the same value |
+| `test_help_and_arguments` | visible change | help text from the core |
+| `test_help_documents_modes_migration_and_provider_limits` | visible change | U1: no migration text; hosts printed from the policy |
+| `test_host_ca_trust_modes` | visible change | wording ("isolated configuration escapes state home"); refusal kept |
+| `test_image_and_ignored_version_variables` | visible change | U2: version-variable notices removed |
+| `test_image_inspection_and_build` | visible change | a failed image inspection exits 1 with a diagnostic instead of the engine status (user, 2026-11-17, Codex) |
+| `test_labels_use_common_namespace` | visible change | phase 6: only the session ownership label (obsolete in the test map) |
+| `test_maintenance_gates_every_build` | visible change | as `test_image_inspection_and_build` |
+| `test_missing_mode_stops_before_engine_state_and_other_checks` | visible change | U1 provider default and its setup message |
+| `test_mode_and_delegation_rejections_precede_engine` | visible change | phase 1-2 union: setup guidance before mode-specific settings |
+| `test_modes` | visible change | U14: shell receives its arguments |
+| `test_mount_paths_and_boundaries` (colon in the workspace) | visible change | phase 5: binds are validated by the core's bind builder after the read-only image check; no build or create |
+| `test_names_failures_and_owned_records` (create warning) | visible change (user, 2026-11-18) | stderr of a successful create is not shown; it is printed when create fails |
+| `test_offline_order_arguments_and_status` | visible change | U8 label inspection adds one image query; qualification check after the name listing, before create |
+| `test_owned_name_is_not_a_collision` | visible change | wording: the create diagnostics are reported; no retry and no removal by name |
+| `test_private_xdg_and_umask` (create umask) | visible change (user, 2026-11-18) | create runs with the caller's umask; the CID record lives in a private 0700 session directory |
+| `test_provider_order_credentials_and_protected_values` | visible change | L7 `/run` |
+| `test_restricted_credentials_match_the_agent_profile` | visible change | source inspection of the old launcher; `AGENT_CREDENTIALS` (U10) |
+| `test_restricted_modes_reserve_network_variables` | visible change | wording ("which this session sets itself") |
+| `test_session_names_the_effective_configuration_directory` | visible change | wording ("which this session sets itself") |
+| `test_setup_entry_point_is_dedicated_and_help_takes_precedence` | visible change | help text from the core |
+| `test_stubborn_sessions_and_control_failures_are_bounded` | visible change | U9 rewrite; wording |
+| `test_tmpfs_and_named_environment` | visible change | L7 `/run` |
+| `test_toolchain_cannot_override_protected_variables` (launcher filter) | visible change | contract: OpenCode's own toolchain filter is dropped; `setup/toolchains.py` protects the profile's names |
+| `test_unselected_provider_forwards_nothing_and_notifies` | visible change | design decision 2: the credential notice is dropped; nothing is forwarded |
+
+The other "to verify at adoption" cases passed against the core. The hook cases
+are rewritten in the reduced `tests/test_wrapper.py` (14 tests).
+
+Environment: WSL2 6.6.87.2, Podman server 4.9.3; image rebuilt through the
+build-only path: `localhost/opencode-cli:latest` `4987c713b195`, OpenCode 1.18.3,
+`build-inputs-hash` `b6c2cfc8a65472fc6afae0abd75b0bafaa772b605f2fc870167d98be28afbc88`;
+guard toolchain tagged from the setup image of this host.
+
+| Check | Result |
+| --- | --- |
+| `--container-build` alone (real engine, maintenance) | Passed: built, labeled, no session container |
+| `python3 -m unittest tests.test_alignment tests.test_agent_profile tests.test_launcher` (disposable container) | Passed: 145 tests, 1 skipped |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 456 tests, 76 skipped |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 121 tests (`test_launcher.py`, `test_wrapper.py`) |
+| `bash tests/run-runtime.sh --shared` | Passed: 288 tests, 29 skipped |
+| `bash tests/run-runtime.sh --setup` | Passed: 67 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` | Passed: 29 tests |
+| `bash tests/run-runtime.sh --network` | Passed: 22 tests |
+| `bash tests/run-runtime.sh --guard` | Passed: 20 tests, 1 skipped |
+| `bash tests/run-runtime.sh` (`test_runtime.py`, `image-smoke.sh`) | Passed: 23 tests |
+| `git diff --check`, `bash -n` on the entry script, the agent part and the scripts | Passed |
+| ShellCheck (warning) on `opencode-container.sh` and `agent/launcher.sh` | Passed |
+
+The installed and qualified code changes (entry script, core, agent part,
+profile) and every runtime image needs the label: installations rerun
+`--container-setup`.

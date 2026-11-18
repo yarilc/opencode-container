@@ -9,7 +9,7 @@
 
 ## 2. Launcher on the shared core
 
-- [ ] 2.1 Add `native.exec_tmp: true` to `agent/profile.json`, write `agent/launcher.sh` (design decision 2), replace `opencode-container.sh` with the reference entry script and delete `opencode-wrapper`. Verify that:
+- [x] 2.1 Add `native.exec_tmp: true` to `agent/profile.json`, write `agent/launcher.sh` (design decision 2), replace `opencode-container.sh` with the reference entry script and delete `opencode-wrapper`. Verify that:
   - `python3 -m unittest tests.test_alignment tests.test_agent_profile tests.test_launcher` passes in the disposable test container;
   - `bash opencode-container.sh --container-help` prints the provider disclosure with the hosts of the four profiles and the `OPENCODE_CONTAINER_YOLO`, `OPENCODE_CONTAINER_PROVIDER`, `OPENCODE_CONTAINER_AGENTS_DIR` and `OPENCODE_CONTAINER_SYSTEM_CONFIG` entries;
   - `diff <(sed s/sandbox-container/opencode-container/g ../sandbox-container/sandbox-container.sh) opencode-container.sh` is empty;

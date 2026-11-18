@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# Deprecated alias kept for existing installations; use opencode-container.sh.
-set -euo pipefail
-script_dir=$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")
-printf 'opencode-wrapper: deprecated; use opencode-container.sh\n' >&2
-exec "$script_dir/opencode-container.sh" "$@"

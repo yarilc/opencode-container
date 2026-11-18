@@ -22,7 +22,7 @@
 
 - [x] 3.1 Rewrite `tests/test_wrapper.py` with the shared `tests/fake_podman.py` and the real agent part (design decision 5). Verify that `python3 -m unittest tests.test_wrapper` passes in the disposable test container.
 - [x] 3.2 Update the wrapper-owned tests and scripts (design decision 6): `tests/run-runtime.sh`, `tests/test_runtime.py`, `tests/image-smoke.sh`, `tests/test_network_runtime.py`, `tests/test_setup_runtime.py` and `tests/test_setup_wrapper.py`. Verify that `python3 -m unittest tests.test_setup_wrapper` passes in the disposable test container and that `bash -n` succeeds on `tests/run-runtime.sh` and `tests/image-smoke.sh`.
-- [ ] 3.3 Update the README, `AGENTS.md`, `docs/setup.md` and `docs/network-contract.md` (design decision 7). Verify that `grep -rn "opencode-wrapper\|OPENCODE_VERSION\|OPENCODE_CONTAINER_VERSION\|io.opencode-container.managed\|previous networking\|required for every launch" --exclude-dir=openspec --exclude-dir=.git --exclude=validation.md .` finds nothing stale.
+- [x] 3.3 Update the README, `AGENTS.md`, `docs/setup.md` and `docs/network-contract.md` (design decision 7). Verify that `grep -rn "opencode-wrapper\|OPENCODE_VERSION\|OPENCODE_CONTAINER_VERSION\|io.opencode-container.managed\|previous networking\|required for every launch" --exclude-dir=openspec --exclude-dir=.git --exclude=validation.md .` finds nothing stale.
 
 ## 4. Integration
 

@@ -26,12 +26,13 @@ defaults to provider mode with the `anthropic` method, shared state,
 ordinary OpenCode permissions, current workspace only, delegation off and CA trust off.
 Accept defaults with Enter; invalid choices are requested again. Existing saved
 choices are offered for review on rerun, including a previously selected offline
-mode. The managed launcher applies the saved network choice. Ordinary direct
-invocation with `OPENCODE_CONTAINER_NETWORK` unset or empty stops with setup
-guidance before runtime prerequisite checks, engine queries or state creation.
-Setup is never started automatically. An explicit empty network override on a
-managed invocation also receives this refusal; remove the override to use the
-saved choice. Offline mode cannot reach any model provider.
+mode. The managed launcher applies the saved network choice. A direct
+invocation with `OPENCODE_CONTAINER_NETWORK` unset or empty selects `provider`;
+without a protected installation or the saved provider settings it stops with
+setup guidance before engine queries or state creation. Setup is never started
+automatically. An explicit empty network override on a managed invocation also
+selects `provider`, never the saved mode; remove the override to use the saved
+choice. Offline mode cannot reach any model provider.
 
 After the worktree question, setup asks for the agent budgets and lifetime:
 `Agent memory limit` (default `4g`), `Agent CPU limit` (default `2`),
@@ -58,17 +59,17 @@ Operators can still invoke a manually prepared wrapper with explicit `offline`,
 qualification and authority checks apply. Image maintenance additionally
 requires exact `OPENCODE_CONTAINER_MAINTENANCE=1`; that consent alone does not select
 a mode. Help and standalone setup/qualification retain their own dispatch checks.
-Standalone `--container-qualify` keeps its offline default when no mode is set
-and can run only fixed controls, never a supplied application command.
+Standalone `--container-qualify` qualifies the same default mode when no mode
+is set and can run only fixed controls, never a supplied application command.
 
-Earlier versions of this wrapper needed no runtime-mode selection; since
-`add-network-egress` a direct launch needs an explicit `OPENCODE_CONTAINER_NETWORK`
-(`unrestricted` keeps the previous networking), and an ordinary missing-mode
-launch now stops with setup guidance. Managed launchers supply the saved mode.
-Install an updated protected wrapper through setup, or update and requalify a
-manual restricted installation: changing the wrapper invalidates its old
-qualification identity. Activation and last-working-release rollback are
-unchanged.
+An unset or empty `OPENCODE_CONTAINER_NETWORK` selects `provider`, OpenCode's
+default. Without a protected installation or the saved provider settings, the
+launch stops with setup guidance; managed launchers supply the saved mode and
+settings. Install the updated protected wrapper through setup, or update and
+requalify a manual restricted installation: changing the entry script, the
+shared launcher core `launcher/core.sh` or the agent part `agent/launcher.sh`
+invalidates the old qualification identity. Activation and last-working-release
+rollback are unchanged.
 
 Provider mode authorizes CONNECT hostname/address and requires matching SNI in
 the initial TLS ClientHello, and in the retried ClientHello after a TLS 1.3
@@ -187,6 +188,12 @@ Every mode needs a runtime image; restricted modes also need the static guard
 and its digest manifest. Provider additionally needs the immutable proxy image,
 selected policy and private egress runtime directory. Setup reuses inspected
 artifacts when suitable and prepares missing ones from the existing recipes.
+It builds a new runtime image by running the installed release's
+`opencode-container.sh --container-build` alone with the candidate tag and the
+scoped maintenance authorization, so the image carries the `build-inputs-hash`
+label that launches check; a reused image with a stale or missing label makes
+the smoke check stop with the stale-image message, and a rerun with refresh
+rebuilds it through the wrapper.
 Compiler tools are installed only in the pinned toolchain image. Compilation
 uses that immutable image without networking. Failed recipe/package acquisition
 does not change pins automatically; resolve the reported maintenance stage and

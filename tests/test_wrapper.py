@@ -56,7 +56,7 @@ XDG = ('XDG_CONFIG_HOME=/opencode-home/.config', 'XDG_DATA_HOME=/opencode-home/.
 
 class WrapperTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-wrapper-', dir=os.environ.get('SANDBOX_TEST_TMPDIR'))
+        self.tmp = tempfile.TemporaryDirectory(prefix='opencode-agent-', dir=os.environ.get('SANDBOX_TEST_TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.bin = self.base / 'bin'

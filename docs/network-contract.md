@@ -13,6 +13,7 @@ isolation, delegation, launcher and image specifications in `openspec/specs/`.
 The shared components are copied unchanged from `sandbox-container` at tag
 `sandbox-ref-25` (commit `6bed77040c3482591e36c9c3500bca89dec61941`):
 
+- `launcher/` (the shared launcher core);
 - `network/` (except the build output `network/bin/`);
 - `setup/`;
 - the shared tests listed in that tag's `tests/test_alignment.py`.
@@ -37,17 +38,18 @@ Intentional differences are limited to per-agent files:
 
 | File | OpenCode value or behavior |
 | --- | --- |
-| `agent/profile.json` | Identity: `opencode-container`, prefix `OPENCODE_CONTAINER`, labels `io.opencode-container.*`. Images: `localhost/opencode-cli`, `localhost/opencode-egress`, `localhost/opencode-guard-toolchain`. Runtime: home `/opencode-home`, command `opencode`. State: configuration `.config/opencode` with override `OPENCODE_CONTAINER_CONFIG_DIR`, plus shared `.local/share/opencode`, `.cache/opencode` and `.local/state/opencode`. Approval: `OPENCODE_CONTAINER_YOLO`. Four API-key methods |
+| `agent/profile.json` | Identity: `opencode-container`, prefix `OPENCODE_CONTAINER`, labels `io.opencode-container.*`. Images: `localhost/opencode-cli`, `localhost/opencode-egress`, `localhost/opencode-guard-toolchain`. Runtime: home `/opencode-home`, command `opencode`. State: configuration `.config/opencode` with override `OPENCODE_CONTAINER_CONFIG_DIR`, plus shared `.local/share/opencode`, `.cache/opencode` and `.local/state/opencode`. Approval: `OPENCODE_CONTAINER_YOLO`. Executable temporary storage (`native.exec_tmp`). Four API-key methods |
 | `agent/policies/default.json` | `anthropic-api`, `openai-api`, `openrouter-api` and `opencode-zen`, revision `opencode-2026-11-10-v1` |
-| `opencode-container.sh` | OpenCode arguments; fixed shared state paths or isolated state; executable `/tmp` and `/opencode-home`; protected `OPENCODE_DISABLE_*` values; toolchain variables filtered (`OPENCODE_*`, provider variables) and set before forwarding; profile-selected credential; no host proxy or CA variables in restricted modes; missing-mode message without setup |
+| `opencode-container.sh` | The thin entry script, identical to the reference's apart from the wrapper name |
+| `agent/launcher.sh` | OpenCode's data for the shared core: `AGENT_EXEC=/usr/local/bin/opencode`, executable temporary storage, one credential per policy profile, the fixed XDG bases, protected `OPENCODE_DISABLE_*=1` values in restricted sessions; hooks for `OPENCODE_CONTAINER_PROVIDER`, the native variables, the read-only integrations, the YOLO permission and the help |
 | `Containerfile`, `.containerignore` | OpenCode image; copies `network/relay.py` and `network/mux.py` |
-| `tests/test_wrapper.py`, `test_runtime.py`, `test_network_runtime.py`, `network_tls_fixture.py`, `run-runtime.sh`, `test_image_pins.py`, `test_reference_copy.py` | OpenCode names, synthetic OpenAI-compatible Chat Completions fixture, provider host inventories |
+| `tests/test_wrapper.py`, `test_runtime.py`, `image-smoke.sh`, `test_network_runtime.py`, `network_tls_fixture.py`, `run-runtime.sh`, `test_image_pins.py`, `test_reference_copy.py` | OpenCode names, synthetic OpenAI-compatible Chat Completions fixture, provider host inventories |
 
 ## Modes
 
 | Mode | Agent access | Socket delegation |
 | --- | --- | --- |
-| unset or empty | Launch stops before engine calls and state creation | No session |
+| unset or empty | `provider`; without the provider settings the launch stops with setup guidance before engine calls and state creation | Rejected |
 | `offline` | Own loopback, pipes and connected socket pairs only | Rejected |
 | `provider` | As offline, plus one preconnected channel to an exact-destination proxy | Rejected |
 | `unrestricted` (explicit only) | Ordinary runtime networking | Exact opt-in allowed |

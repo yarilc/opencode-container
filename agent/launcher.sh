@@ -70,7 +70,7 @@ opencode_opt_in() {
 
 # Runs before any engine query or state operation.
 agent_validate() {
-    local mode=$1 profile_provider=''
+    local mode=$1 profile_provider='' yolo=${OPENCODE_CONTAINER_YOLO:-}
     if [[ -n "${OPENCODE_CONTAINER_PROVIDER+x}" ]]; then
         opencode_provider_names "$OPENCODE_CONTAINER_PROVIDER" >/dev/null || {
             printf '%s: OPENCODE_CONTAINER_PROVIDER must be one of: anthropic, openai, google, openrouter, amazon-bedrock, azure, opencode, none\n' \
@@ -93,7 +93,7 @@ agent_validate() {
     fi
     opencode_agents_dir=$(opencode_opt_in OPENCODE_CONTAINER_AGENTS_DIR "${HOME:-}/.agents") || return 1
     opencode_system_config=$(opencode_opt_in OPENCODE_CONTAINER_SYSTEM_CONFIG /etc/opencode) || return 1
-    case "${OPENCODE_CONTAINER_YOLO,,}" in
+    case "${yolo,,}" in
         1|true|yes)
             if ((! shell_mode)) && [[ -n "${OPENCODE_PERMISSION:-}" ]]; then
                 printf '%s: OPENCODE_CONTAINER_YOLO cannot be combined with OPENCODE_PERMISSION; unset one of them\n' \

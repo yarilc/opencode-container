@@ -96,7 +96,11 @@ Setup SHALL show selected settings, paths, service changes and required image ac
 - **AND** ordinary subsequent launches still require separate authorization for missing-image builds or refreshes
 
 ### Requirement: Protected complete installation
-Setup SHALL prepare all files needed for the selected workflow in a native installation outside writable workspace, worktree-parent and state trees. It SHALL validate ownership, ancestor permissions and overlaps, create missing private directories, and refuse unsafe existing paths without recursive permission repair, credential imports, relabeling or added privileges.
+Setup SHALL prepare all files needed for the selected workflow in a native installation outside writable workspace, worktree-parent and state trees. Those files include the shared launcher core and the agent launcher part.
+
+Setup SHALL validate ownership, ancestor permissions and overlaps, and SHALL create missing private directories. It SHALL refuse unsafe existing paths without recursive permission repair, credential imports, relabeling or added privileges.
+
+Managed launches SHALL verify the entry script, the launcher core and the agent launcher part as protected files. Setup and its smoke checks SHALL ignore host values of `OPENCODE_CONTAINER_ENV_VARS` and `OPENCODE_CONTAINER_READONLY_STATE`.
 
 #### Scenario: Checkout on a Windows mount
 - **WHEN** setup runs from a checkout on a permission-emulating Windows filesystem and the user selects a valid native installation
@@ -107,12 +111,16 @@ Setup SHALL prepare all files needed for the selected workflow in a native insta
 - **WHEN** a chosen path has unsafe ancestors, cannot enforce private permissions or overlaps an application-writable mount
 - **THEN** setup identifies the path and fails without modifying existing permissions or claiming completion
 
+#### Scenario: Installed launcher core
+- **WHEN** setup completes an installation
+- **THEN** the release contains `launcher/core.sh` and `agent/launcher.sh` as protected files, and a managed launch refuses a release where either is writable by others
+
 ### Requirement: Mode-specific image and guard preparation
-Setup SHALL inspect or prepare the runtime image and the additional components required by the selected mode. Restricted modes SHALL receive a validated static guard and digest manifest; provider mode SHALL also receive a valid selected policy, private runtime directory and immutable proxy image identity. Existing suitable artifacts SHALL be reused unless refresh is approved.
+Setup SHALL inspect or prepare the runtime image and the additional components required by the selected mode. It SHALL build a new runtime image by running the installed release's `opencode-container.sh --container-build` without OpenCode arguments, under maintenance authorization and with the candidate image tag, so the image carries the same `build-inputs-hash` label that launches check. Restricted modes SHALL receive a validated static guard and digest manifest; provider mode SHALL also receive a valid selected policy, private runtime directory and immutable proxy image identity. Existing suitable artifacts SHALL be reused unless refresh is approved; a reused runtime image with a stale label SHALL make the smoke check stop with the stale-image message.
 
 #### Scenario: Fresh provider setup
 - **WHEN** provider setup is approved with no prepared artifacts
-- **THEN** setup prepares the pinned build inputs, toolchain, runtime and proxy images, compiles the guard and validates its manifest and policy
+- **THEN** setup prepares the pinned build inputs, toolchain and proxy images, builds the runtime image through the wrapper's build-only operation, compiles the guard and validates its manifest and policy
 - **AND** launch preferences refer to an inspected immutable proxy image rather than an unresolved local tag
 
 #### Scenario: Offline or unrestricted setup
@@ -125,8 +133,12 @@ Setup SHALL inspect or prepare the runtime image and the additional components r
 - **THEN** setup reports the failed stage and leaves the last working installation selected
 - **AND** it does not substitute a different policy, toolchain or network mode
 
+#### Scenario: Stale reusable image
+- **WHEN** the reusable runtime image carries no `build-inputs-hash` label, or one that does not match the installed inputs
+- **THEN** the smoke check stops with the stale-image message instead of declaring the sandbox ready, and a rerun with refresh rebuilds it through the wrapper
+
 ### Requirement: Persistent non-secret managed launch preferences
-Setup SHALL save versioned non-secret preferences and a managed launcher usable from any workspace without exports. Preferences and launcher code SHALL stay outside application-writable mounts and be validated before use. The launcher SHALL preserve arguments, stdin, terminal handling and the current directory. Direct invocation SHALL accept explicit runtime modes; an unset or empty effective mode SHALL receive missing-setup guidance.
+Setup SHALL save versioned non-secret preferences and a managed launcher usable from any workspace without exports. Preferences and launcher code SHALL stay outside application-writable mounts and be validated before use. The launcher SHALL preserve arguments, stdin, terminal handling and the current directory. Direct invocation SHALL accept explicit runtime modes. An unset or empty effective mode SHALL select OpenCode's provider default, which needs the provider settings or gets setup guidance.
 
 #### Scenario: New terminal and workspace
 - **WHEN** the user invokes the managed launcher in a new terminal from a separate workspace
@@ -154,13 +166,13 @@ Setup SHALL save versioned non-secret preferences and a managed launcher usable 
 
 #### Scenario: Saved mode supplies launch configuration
 - **WHEN** a validated managed launcher supplies saved offline, provider or unrestricted mode and there is no network environment override
-- **THEN** the ordinary missing-setup check accepts the effective mode
+- **THEN** the wrapper uses that mode instead of its default
 - **AND** existing mode-specific readiness and qualification checks still determine whether an application can start
 
 #### Scenario: Empty network override is not replaced
-- **WHEN** an operator explicitly sets `OPENCODE_CONTAINER_NETWORK` to an empty value for an otherwise valid managed launch
-- **THEN** the empty value overrides the saved mode and the wrapper returns the missing-setup diagnostic
-- **AND** it does not silently restore the saved mode or select offline or unrestricted networking
+- **WHEN** an operator explicitly sets `OPENCODE_CONTAINER_NETWORK` to an empty value for a managed launch whose saved mode is offline or unrestricted
+- **THEN** the empty value overrides the saved mode and the wrapper applies its provider default, with setup guidance when the provider settings are missing
+- **AND** it does not silently restore the saved mode
 
 #### Scenario: Explicit direct operator workflow
 - **WHEN** an operator invokes the wrapper directly with a valid nonempty network mode and its required configuration

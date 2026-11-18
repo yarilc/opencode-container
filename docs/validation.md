@@ -1112,6 +1112,7 @@ guard toolchain tagged from the setup image of this host.
 | `bash tests/run-runtime.sh` (`test_runtime.py`, `image-smoke.sh`) | Passed: 23 tests |
 | `git diff --check`, `bash -n` on the entry script, the agent part and the scripts | Passed |
 | ShellCheck (warning) on `opencode-container.sh` and `agent/launcher.sh` | Passed |
+| Operator `--container-setup` on this host, the Rocky Linux 9 lab host and the newer WSL host, then an OpenCode session in provider mode | Passed (operator, 2026-11-18) |
 
 The installed and qualified code changes (entry script, core, agent part,
 profile) and every runtime image needs the label: installations rerun

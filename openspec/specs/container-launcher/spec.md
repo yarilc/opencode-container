@@ -7,11 +7,12 @@ Expose consistent wrapper controls while preserving OpenCode arguments and predi
 ## Requirements
 
 ### Requirement: Transparent arguments and wrapper help
-The wrapper SHALL consume only `--container-build`, `--container-shell`, `--container-git-worktree`, `--container-qualify`, the internal `--container-qualify-probe` and `--container-help`, forwarding all other arguments unchanged and in order to OpenCode. Wrapper help MUST succeed without Podman, state creation, image operations, or service access; native OpenCode `--help` MUST remain an agent argument. Help SHALL describe the network modes and their limits.
+The wrapper SHALL consume only `--container-build`, `--container-shell`, `--container-git-worktree`, `--container-qualify`, the internal `--container-qualify-probe` and `--container-help`, forwarding all other arguments unchanged and in order to OpenCode. Wrapper help MUST succeed without Podman, state creation, image operations, or service access, and SHALL use the layout of the shared launcher core followed by OpenCode's agent part; native OpenCode `--help` MUST remain an agent argument. Help SHALL describe the network modes and their limits.
 
 #### Scenario: Side-effect-free help
 - **WHEN** `--container-help` is requested with Podman absent or invalid runtime settings
 - **THEN** wrapper usage and contracts are printed successfully without filesystem or engine side effects
+- **AND** it lists every common `OPENCODE_CONTAINER_*` variable with its default, and then OpenCode's own variables
 
 #### Scenario: Normal argument forwarding
 - **WHEN** OpenCode arguments contain spaces, empty strings, flags, or native `--help`
@@ -19,18 +20,18 @@ The wrapper SHALL consume only `--container-build`, `--container-shell`, `--cont
 
 #### Scenario: Help describes the network contract
 - **WHEN** `--container-help` is requested
-- **THEN** the output names `OPENCODE_CONTAINER_NETWORK` with its three values, `OPENCODE_CONTAINER_MAINTENANCE`, `OPENCODE_CONTAINER_CONFIG_DIR`, the CA variables and `--container-qualify`
-- **AND** it states the residual exfiltration limit of provider mode
+- **THEN** the output names `OPENCODE_CONTAINER_NETWORK` with its three values and the provider default, `OPENCODE_CONTAINER_MAINTENANCE`, `OPENCODE_CONTAINER_CONFIG_DIR`, the CA variables and `--container-qualify`
+- **AND** it states the residual exfiltration limit of provider mode with each base profile's hosts
 
 ### Requirement: Explicit image refresh and error handling
-`--container-build` SHALL build or refresh the selected image before starting the selected session. Ordinary startup SHALL build only when image inspection returns missing-image status 1 and MUST stop on every other inspection error. Every build SHALL require exact `OPENCODE_CONTAINER_MAINTENANCE=1`, or stop before any build or pull. All modes except help MUST apply engine, delegation, restricted and state preflights before image operations.
+`--container-build` with OpenCode arguments SHALL rebuild the selected image, using the layer cache, before starting the selected session. Without OpenCode arguments (`--container-shell` and `--container-git-worktree` do not count) it SHALL validate every launch setting, build the image and exit without creating a container. Ordinary startup SHALL build only when image inspection returns missing-image status 1 and MUST stop on every other inspection error. Every image SHALL carry a `build-inputs-hash` label over its build inputs; ordinary startup SHALL refuse an image whose label differs, naming the rebuild command. Every build SHALL require exact `OPENCODE_CONTAINER_MAINTENANCE=1`, or stop before any build or pull, and SHALL pull the exact base first, then run with `--pull=never` and the docker format, without a timeout. All modes except help MUST apply engine, delegation, restricted and state preflights before image operations.
 
 #### Scenario: Unexpected inspection failure
 - **WHEN** image inspection fails with an engine/storage status other than 1
 - **THEN** no automatic build or container creation occurs and the failure is reported
 
 #### Scenario: Missing image and explicit refresh
-- **WHEN** the image is missing or `--container-build` is requested, with `OPENCODE_CONTAINER_MAINTENANCE=1`
+- **WHEN** the image is missing, or `--container-build` is requested with OpenCode arguments, with `OPENCODE_CONTAINER_MAINTENANCE=1`
 - **THEN** a successful preflight is followed by a build from the wrapper's physical recipe directory and then the requested OpenCode or shell session
 - **AND** build failure prevents session creation
 
@@ -38,12 +39,22 @@ The wrapper SHALL consume only `--container-build`, `--container-shell`, `--cont
 - **WHEN** the image is missing or `--container-build` is requested and `OPENCODE_CONTAINER_MAINTENANCE` is unset or differs from exactly `1`
 - **THEN** the wrapper exits nonzero naming the variable, without building, pulling or creating a container
 
+#### Scenario: Build-only refresh
+- **WHEN** `OPENCODE_CONTAINER_NETWORK=unrestricted OPENCODE_CONTAINER_MAINTENANCE=1 OPENCODE_CONTAINER_IMAGE=localhost/opencode-cli:setup-x opencode-container.sh --container-build` runs
+- **THEN** the image is built with a matching `build-inputs-hash` label and the wrapper exits 0 without creating a container
+- **AND** an invalid budget or a relative `OPENCODE_CONTAINER_STATE_DIR` fails before any image operation, naming the setting
+
+#### Scenario: Stale image
+- **WHEN** the image exists without a `build-inputs-hash` label, or with one that differs from the current inputs
+- **THEN** ordinary startup stops before container creation, naming `--container-build` and `OPENCODE_CONTAINER_MAINTENANCE=1`
+
 ### Requirement: Shell mode
-`--container-shell` SHALL bypass the OpenCode entrypoint and start `/bin/bash` without OpenCode arguments. It MUST retain the same state, mount, identity, environment, delegation, lifecycle, and preflight contracts as a normal session.
+`--container-shell` SHALL bypass the OpenCode entrypoint and start `/bin/bash` with the remaining arguments in every network mode, without the approval bypass. It MUST retain the same state, mount, identity, environment, delegation, lifecycle, and preflight contracts as a normal session.
 
 #### Scenario: Shell with agent arguments
-- **WHEN** shell mode is requested alongside arbitrary OpenCode arguments
-- **THEN** Bash starts directly and those agent arguments are omitted
+- **WHEN** shell mode is requested with `-c "echo ok"`
+- **THEN** Bash starts directly, runs `-c` and `echo ok` as two arguments and prints `ok`
+- **AND** with `OPENCODE_CONTAINER_YOLO=1` the shell session has no `OPENCODE_PERMISSION={"*":"allow"}`
 
 ### Requirement: Explicit parent workspace exposure
 `--container-git-worktree` SHALL mount the immediate parent of the original physical working directory read/write at the same absolute path while preserving that original directory as workdir. Ordinary sessions MUST expose only the current workspace. Wrapper help and documentation MUST describe the broader parent access.
@@ -53,20 +64,8 @@ The wrapper SHALL consume only `--container-build`, `--container-shell`, `--cont
 - **THEN** the physical directory's immediate parent is mounted and the session starts in the original physical directory
 - **AND** workspace naming continues to use that original directory's basename
 
-### Requirement: Common entry point with deprecated shim
-The wrapper SHALL be `opencode-container.sh` at the repository root. `opencode-wrapper` SHALL remain as a deprecated shim: it prints one stderr warning naming the new script, then replaces itself with it, passing all arguments unchanged and preserving stdin, the exit status and signal handling. The shim SHALL work when invoked through a symlink or alias. Wrapper diagnostics SHALL use the `opencode-container:` prefix.
-
-#### Scenario: Invocation through the old name
-- **WHEN** the operator runs `opencode-wrapper run "hello world" --help`, directly or through a symlink
-- **THEN** stderr contains one deprecation warning naming `opencode-container.sh`
-- **AND** the session behaves exactly as if `opencode-container.sh run "hello world" --help` had been run, including its exit status
-
-#### Scenario: Help through the new name
-- **WHEN** the operator runs `opencode-container.sh --container-help`
-- **THEN** help is printed without the deprecation warning and without engine queries or state creation
-
 ### Requirement: YOLO switch
-`OPENCODE_CONTAINER_YOLO` SHALL enable the OpenCode permission bypass with the common boolean words: `1`, `true`, `yes` enable it and unset, empty, `0`, `false`, `no` disable it, case-insensitively. Any other value SHALL stop with status 1 naming the variable before engine queries or state creation. When enabled, the session SHALL receive `OPENCODE_PERMISSION={"*":"allow"}`. The switch SHALL NOT change mounts, environment forwarding, delegation or hardening.
+`OPENCODE_CONTAINER_YOLO` SHALL enable the OpenCode permission bypass with the common boolean words: `1`, `true`, `yes` enable it and unset, empty, `0`, `false`, `no` disable it, case-insensitively. Any other value SHALL stop with status 1 naming the variable before engine queries or state creation. When enabled, an OpenCode session SHALL receive `OPENCODE_PERMISSION={"*":"allow"}`; shell mode and the qualification probe SHALL ignore it. The switch SHALL NOT change mounts, environment forwarding, delegation or hardening.
 
 #### Scenario: Bypass scope
 - **WHEN** YOLO is enabled and the OpenCode configuration contains `ask` or `deny` rules
@@ -86,7 +85,7 @@ The wrapper SHALL be `opencode-container.sh` at the repository root. `opencode-w
 - **THEN** the wrapper exits with status 1 naming the variable before any engine query
 
 #### Scenario: Conflicting permission input
-- **WHEN** YOLO is enabled and a nonempty `OPENCODE_PERMISSION` is set on the host
+- **WHEN** YOLO is enabled for an OpenCode session and a nonempty `OPENCODE_PERMISSION` is set on the host
 - **THEN** the wrapper exits with status 1 explaining that the two cannot be combined, before any engine query
 
 ### Requirement: Image name override
@@ -100,9 +99,13 @@ The wrapper SHALL be `opencode-container.sh` at the repository root. `opencode-w
 - **WHEN** `OPENCODE_CONTAINER_IMAGE=localhost/opencode-custom:test` is set, the image is missing and maintenance is authorized
 - **THEN** the wrapper inspects, builds and runs exactly that name
 
-### Requirement: Ignored version variables
-When `OPENCODE_CONTAINER_VERSION` or `OPENCODE_VERSION` is set, the wrapper SHALL print one stderr warning that the variable is ignored and that the version is pinned in `Containerfile`, and SHALL continue with the selected image.
+### Requirement: Common entry point
+The wrapper SHALL be `opencode-container.sh` at the repository root, and wrapper diagnostics SHALL use the `opencode-container:` prefix. There SHALL be no other entry point: the earlier `opencode-wrapper` shim is removed, and the earlier `OPENCODE_CONTAINER_VERSION` and `OPENCODE_VERSION` variables SHALL have no effect and produce no notice.
 
-#### Scenario: Legacy version variable set
-- **WHEN** `OPENCODE_VERSION=1.17.0` is set
-- **THEN** stderr contains one warning naming the variable, the build passes no version argument, and the session starts normally
+#### Scenario: Earlier names
+- **WHEN** `OPENCODE_VERSION=1.17.0` or `OPENCODE_CONTAINER_VERSION=1.17.0` is set
+- **THEN** the launch behaves as if the variable were unset, with no notice, and the build passes no version argument
+
+#### Scenario: Help through the entry point
+- **WHEN** the operator runs `opencode-container.sh --container-help`
+- **THEN** help is printed without engine queries or state creation

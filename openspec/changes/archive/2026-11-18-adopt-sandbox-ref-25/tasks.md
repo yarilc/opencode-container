@@ -37,6 +37,6 @@
 
 ## Workflow follow-up
 
-- The operator pushes `main` in the six repositories and runs `--container-setup` for OpenCode on this host, the Rocky Linux 9 lab host and the newer WSL host, then checks an OpenCode session in provider mode.
+- The operator pushes `main` in the six repositories and runs `--container-setup` for OpenCode on this host, the Rocky Linux 9 lab host and the newer WSL host, then checks an OpenCode session in provider mode. Done (operator, 2026-11-18): passed, no errors.
 - Archive this change with spec sync. This creates `openspec/specs/shared-launcher/spec.md` in this repository.
 - Every wrapper then runs on the shared launcher core.

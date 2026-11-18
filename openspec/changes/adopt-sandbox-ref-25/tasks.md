@@ -2,10 +2,10 @@
 
 ## 1. Adopt `sandbox-ref-25`
 
-- [ ] 1.1 Commit this change directory on `main`. Save the current `opencode-container.sh` and `tests/test_wrapper.py` outside the repository as the old-test baseline. From `sandbox-container`, run `python3 -I tools/propagate.py ../opencode-container sandbox-ref-21 sandbox-ref-25` (dry run), then `--apply`. Add `launcher` to `CLOSED_DIRECTORIES` in `tests/test_reference_copy.py`. Verify that:
+- [x] 1.1 Commit this change directory on `main`. Save the current `opencode-container.sh` and `tests/test_wrapper.py` outside the repository as the old-test baseline. From `sandbox-container`, run `python3 -I tools/propagate.py ../opencode-container sandbox-ref-21 sandbox-ref-25` (dry run), then `--apply`. Add `launcher` to `CLOSED_DIRECTORIES` in `tests/test_reference_copy.py`. Verify that:
   - the plan lists exactly the files in design "Context";
   - the tool switched to `adopt-sandbox-ref-25`.
-- [ ] 1.2 Fix the parity table in `docs/network-contract.md` by hand (design decision 7). Verify that the reference, Claude, Codex, Antigravity and Pi rows equal those in their repositories.
+- [x] 1.2 Fix the parity table in `docs/network-contract.md` by hand (design decision 7). Verify that the reference, Claude, Codex, Antigravity and Pi rows equal those in their repositories.
 
 ## 2. Launcher on the shared core
 

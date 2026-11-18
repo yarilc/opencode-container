@@ -13,14 +13,17 @@ for tool in opencode openspec bash bwrap bzip2 curl diff file find gawk git grep
 [[ $(awk '$2=="/" {print $4}' /proc/mounts) == ro,* ]]
 grep -q 'CapEff:[[:space:]]*0000000000000000' /proc/self/status
 grep -q 'NoNewPrivs:[[:space:]]*1' /proc/self/status
-for path in /tmp /run /var/tmp; do
+# /run is a 32 MiB noexec tmpfs that the session user cannot write (contract L7).
+options=$(awk '$2=="/run" {print $4}' /proc/mounts)
+[[ ,$options, == *,nosuid,* && ,$options, == *,nodev,* && ,$options, == *,noexec,* ]]
+[[ $(df -Pk /run | awk 'NR==2 {print $2}') == 32768 ]]
+if touch /run/opencode-write-probe 2>/dev/null; then exit 12; fi
+for path in /tmp /var/tmp; do
     options=$(awk -v p="$path" '$2==p {print $4}' /proc/mounts)
     [[ ,$options, == *,nosuid,* && ,$options, == *,nodev,* ]]
     [[ $(stat -c %a "$path") == 1777 ]]
     capacity=$(df -Pk "$path" | awk 'NR==2 {print $2}')
-    expected=524288
-    [[ $path != /run ]] || expected=32768
-    [[ $capacity == "$expected" ]]
+    [[ $capacity == 524288 ]]
     if [[ $path == /tmp ]]; then [[ ,$options, != *,noexec,* ]]; else [[ ,$options, == *,noexec,* ]]; fi
     printf '#!/bin/sh\nexit 0\n' > "$path/exec-probe"
     chmod +x "$path/exec-probe"

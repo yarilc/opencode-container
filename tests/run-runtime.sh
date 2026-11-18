@@ -18,10 +18,11 @@ guard_environment=()
 # the checkout's .test-state.
 project_mode=ro
 # Shared suites copied from the reference, run without real-engine opt-ins.
-shared=(test_reference_copy test_alignment test_agent_profile test_network_policy test_mux test_tls_client_hello
+shared=(test_reference_copy test_alignment test_launcher test_agent_profile test_network_policy test_mux test_tls_client_hello
     test_tls_proxy test_platform test_qualification test_guard test_session test_network_feasibility)
 case "${1:-}" in
-    --wrapper) pattern=test_wrapper.py ;;
+    # The shared launcher tests and this wrapper's own: test_launcher.py, test_wrapper.py.
+    --wrapper) pattern='test_[lw][ar][au]*.py' ;;
     --shared) pattern='' ;;
     --setup) pattern=test_setup.py; project_mode=rw ;;
     --setup-runtime) pattern=test_setup_runtime.py; project_mode=rw ;;

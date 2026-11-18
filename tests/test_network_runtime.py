@@ -54,8 +54,9 @@ class NetworkRuntime(unittest.TestCase):
             shutil.copyfile(source, self.install / 'network' / source.name)
         (self.install / 'agent/policies').mkdir(mode=0o700, parents=True, exist_ok=True)
         (self.install / 'setup').mkdir(mode=0o700, exist_ok=True)
-        for name in ('agent/profile.json', 'agent/policies/default.json', 'setup/common.py', 'setup/toolchains.py',
-                     'Containerfile'):
+        (self.install / 'launcher').mkdir(mode=0o700, exist_ok=True)
+        for name in ('agent/profile.json', 'agent/policies/default.json', 'agent/launcher.sh', 'launcher/core.sh',
+                     'setup/common.py', 'setup/toolchains.py', 'Containerfile', '.containerignore'):
             shutil.copyfile(ROOT / name, self.install / name)
         binary_dir = self.install / 'network/bin'
         binary_dir.mkdir(mode=0o700, exist_ok=True)
@@ -127,17 +128,19 @@ class NetworkRuntime(unittest.TestCase):
         return owned
 
     def test_restricted_delegation_grid_and_disabled_override(self):
+        _, provider = self.provider_fixture()
         for mode in ('offline', 'provider'):
+            # Provider mode checks its own settings first, so the grid supplies them.
+            settings = provider if mode == 'provider' else {}
             for state in ('', self.env['OPENCODE_CONTAINER_STATE_DIR']):
                 for shell in (False, True):
                     for yolo in ('0', '1'):
                         result = subprocess.run([str(self.wrapper), *(['--container-shell'] if shell else ['--version'])],
-                            cwd=self.project, env=self.env | {'OPENCODE_CONTAINER_NETWORK':mode,
+                            cwd=self.project, env=self.env | settings | {'OPENCODE_CONTAINER_NETWORK':mode,
                                 'OPENCODE_CONTAINER_STATE_DIR':state, 'OPENCODE_CONTAINER_YOLO':yolo,
                                 'OPENCODE_CONTAINER_PODMAN':'1'}, input='', capture_output=True, text=True, timeout=10)
                         self.assertNotEqual(result.returncode, 0)
                         self.assertIn('rejects OPENCODE_CONTAINER_PODMAN=1', result.stderr)
-        _, provider = self.provider_fixture()
         for mode in ('offline', 'provider'):
             for state in ('', self.env['OPENCODE_CONTAINER_STATE_DIR']):
                 environment = provider | {'OPENCODE_CONTAINER_NETWORK':mode}

@@ -22,6 +22,7 @@
     "config_home": ".config/opencode",
     "shared_dirs": [".local/share/opencode", ".cache/opencode", ".local/state/opencode"],
     "private_shared_dirs": true,
+    "exec_tmp": true,
     "protected_env": [
       "OPENCODE_", "ANTHROPIC_", "OPENAI_", "OPENROUTER_", "GEMINI_",
       "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY",

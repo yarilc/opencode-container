@@ -447,7 +447,7 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
         result=subprocess.run([str(WRAPPER),'--version'],env=self.env,cwd=self.project,
                               capture_output=True,text=True,timeout=60)
         self.assert_success(result)
-        self.assertEqual(result.stdout.strip(),'1.18.3')
+        self.assertEqual(result.stdout.strip(),'1.19.5')
 
     def resolved_permission(self, **env):
         result=subprocess.run([str(WRAPPER),'debug','config'],env=self.env|{'OPENCODE_DISABLE_AUTOUPDATE':'1',

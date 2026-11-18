@@ -69,8 +69,8 @@ and has verified memory, CPU and process budgets.
 The relay sets `NO_PROXY=localhost,127.0.0.1,::1`. OpenTUI and `opencode run
 --attach` reach the local OpenCode server over loopback without the relay;
 with an empty `NO_PROXY` that connection fails. Named Unix sockets and host
-services are unavailable. OpenCode 1.18.3 needs none for `run`, its tools or
-the TUI. It does not use the `bwrap` in the image.
+services are unavailable. The OpenCode 1.19.5 TUI starts and renders under
+these constraints. The image provides `bwrap` as a general tool.
 
 Restricted launches follow the Claude wrapper order:
 1. arguments;
@@ -92,10 +92,10 @@ Restricted launches follow the Claude wrapper order:
 
 | Profile | Destinations | Credential | Status |
 | --- | --- | --- | --- |
-| `anthropic-api` | `api.anthropic.com:443` | `ANTHROPIC_API_KEY` | Measured on 1.18.3; real key unverified |
-| `openai-api` | `api.openai.com:443` | `OPENAI_API_KEY` | Measured on 1.18.3; real key unverified |
-| `openrouter-api` | `openrouter.ai:443` | `OPENROUTER_API_KEY` | Measured on 1.18.3; real key unverified |
-| `opencode-zen` | `opencode.ai:443` (Zen `https://opencode.ai/zen/v1`) | `OPENCODE_API_KEY` | Measured on 1.18.3; real key unverified |
+| `anthropic-api` | `api.anthropic.com:443` | `ANTHROPIC_API_KEY` | Measured on 1.19.5 with a dummy key |
+| `openai-api` | `api.openai.com:443` | `OPENAI_API_KEY` | Measured on 1.19.5 with a dummy key |
+| `openrouter-api` | `openrouter.ai:443` | `OPENROUTER_API_KEY` | Measured on 1.19.5 with a dummy key |
+| `opencode-zen` | `opencode.ai:443` (Zen `https://opencode.ai/zen/v1`) | `OPENCODE_API_KEY` | Measured on 1.19.5 with a dummy key |
 
 In provider mode the profile selects the only forwarded credential.
 `OPENCODE_CONTAINER_PROVIDER` must be unset, `none` or the matching provider,
@@ -109,13 +109,18 @@ Restricted sessions set `OPENCODE_DISABLE_AUTOUPDATE`, `..._DEFAULT_PLUGINS`,
 `..._LSP_DOWNLOAD`, `..._MODELS_FETCH` and `..._SHARE` to `1` after
 forwarding and after the toolchain variables. A toolchain cannot set any
 `OPENCODE_` or provider variable: the launcher leaves it out with a warning.
-As measured on 1.18.3, these values win over `opencode.json`
-(`autoupdate`, `share: "auto"`). Two requests have no control:
-- the background install of `@opencode-ai/plugin` into each configuration directory;
-- an explicit `opencode upgrade`.
+In 1.19.5, `OPENCODE_DISABLE_MODELS_FETCH` suppresses requests to
+`models.opencode.ai` and leaves the bundled catalog available.
+`OPENCODE_DISABLE_AUTOUPDATE` suppresses the startup update check even with
+`autoupdate: true`. Starting with 1.19.0, installation of updates requires
+an explicit action.
+`OPENCODE_DISABLE_DEFAULT_PLUGINS` skips built-in plugins and
+`OPENCODE_DISABLE_LSP_DOWNLOAD` blocks automatic LSP downloads.
 
-Both contact `registry.npmjs.org`. The proxy denies them, and startup continues
-with a warning. Session sharing uses `opncd.ai`, which no profile allows.
+Session sharing was discontinued in 1.19.1. The wrapper still sets
+`OPENCODE_DISABLE_SHARE` for older releases. A background configuration
+dependency install and explicit `opencode upgrade` still contact
+`registry.npmjs.org`. The proxy denies both requests.
 
 ## Limits
 

@@ -163,8 +163,9 @@ Shell mode and the qualification probe never apply YOLO. YOLO does not change
 mounts, environment forwarding, delegation or hardening.
 When disabled, configured OpenCode permissions apply unchanged.
 
-OpenCode's own `--auto` flag is not used: OpenCode 1.18.3 accepts it only on the
-default interface and `run`, and rejects it before other subcommands.
+The wrapper implements YOLO through `OPENCODE_PERMISSION`. OpenCode 1.19.5
+accepts its native `--auto` option on the default interface and `run`. Native
+`--auto` leaves explicit deny rules in effect.
 
 ### Container names
 
@@ -195,9 +196,10 @@ name as `CONTAINER_NAME`. Three sources are forwarded:
    `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`,
    `OPENCODE_SERVER_PASSWORD`, `OPENCODE_SERVER_USERNAME`, and in unrestricted
    mode the `OPENCODE_DISABLE_*` controls).
-2. In unrestricted mode, the provider selected with `OPENCODE_CONTAINER_PROVIDER`. Values are
-   OpenCode provider IDs; the variable sets come from the provider metadata of
-   the pinned OpenCode 1.18.3:
+2. In unrestricted mode, the provider selected with `OPENCODE_CONTAINER_PROVIDER`.
+   Values are OpenCode provider IDs. The table lists the variables the wrapper
+   forwards. The four provider-mode credentials match the OpenCode 1.19.5
+   catalog.
 
    | Value | Variables |
    | --- | --- |

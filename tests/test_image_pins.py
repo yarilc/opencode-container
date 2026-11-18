@@ -144,12 +144,12 @@ class ImagePinTests(unittest.TestCase):
             'latest package': self.recipe.replace('"@fission-ai/openspec@${OPENSPEC_VERSION}"',
                                                   '@fission-ai/openspec@latest'),
             'unversioned package': self.recipe.replace('"opencode-ai@${OPENCODE_VERSION}"', 'opencode-ai'),
-            'version range': self.recipe.replace('ARG OPENSPEC_VERSION=1.16.0', 'ARG OPENSPEC_VERSION=^1.16.0'),
+            'version range': self.recipe.replace('ARG OPENSPEC_VERSION=2.0.0', 'ARG OPENSPEC_VERSION=^2.0.0'),
             'missing package': self.recipe.replace('"opencode-ai@${OPENCODE_VERSION}" \\\n', ''),
             'third-party image': self.recipe.replace('docker.io/library/node:22-bookworm-slim',
                                                      'ghcr.io/anomalyco/opencode'),
             'missing toolset package': self.recipe.replace('        nano \\\n', ''),
-            'diverging cli': self.recipe.replace('ARG OPENCODE_VERSION=1.18.3', 'ARG OPENCODE_VERSION=1.18.4'),
+            'diverging cli': self.recipe.replace('ARG OPENCODE_VERSION=1.19.5', 'ARG OPENCODE_VERSION=1.19.6'),
         }
         for name, recipe in cases.items():
             with self.subTest(name=name):
@@ -157,8 +157,8 @@ class ImagePinTests(unittest.TestCase):
                 self.assertTrue(violations(recipe, self.tested_cli))
         message = violations(cases['diverging cli'], self.tested_cli)
         self.assertEqual(len(message), 1)
-        self.assertIn('1.18.4', message[0])
-        self.assertIn('1.18.3', message[0])
+        self.assertIn('1.19.6', message[0])
+        self.assertIn('1.19.5', message[0])
 
     def test_workdir_exists_in_the_image(self):
         self.assertEqual(workdir_violations(self.recipe), [])

@@ -6,8 +6,8 @@ set -euo pipefail
 [[ $HOME == /opencode-home && -n $USER ]]
 for tool in opencode openspec bash bwrap bzip2 curl diff file find gawk git grep jq less nano \
     patch podman ps python3 rg sed tar unzip xz zip; do command -v "$tool" >/dev/null; done
-[[ $(opencode --version) == 1.18.3 ]]
-[[ $(openspec --version) == 1.16.0 ]]
+[[ $(opencode --version) == 1.19.5 ]]
+[[ $(openspec --version) == 2.0.0 ]]
 [[ -z ${CONTAINER_HOST+x} ]]
 [[ ! -S /run/podman/podman.sock ]]
 [[ $(awk '$2=="/" {print $4}' /proc/mounts) == ro,* ]]

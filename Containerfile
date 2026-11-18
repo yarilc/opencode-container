@@ -2,8 +2,8 @@
 # README.md ("Updating pinned image inputs") and record the result in docs/validation.md.
 FROM docker.io/library/node:22-bookworm-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da
 
-ARG OPENCODE_VERSION=1.18.3
-ARG OPENSPEC_VERSION=1.16.0
+ARG OPENCODE_VERSION=1.19.5
+ARG OPENSPEC_VERSION=2.0.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/opencode-home \

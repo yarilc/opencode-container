@@ -4,7 +4,7 @@
 
 - `opencode-container.sh` is the thin entry script shared by every wrapper: it only sources `launcher/core.sh` with `agent/launcher.sh`. The shared launcher core owns runtime policy: network mode admission, mounts, hardening, environment forwarding, socket handling, naming, labels and cleanup; restricted preparation, proxy lifecycle and restricted container arguments come from `network/session.py`. `agent/launcher.sh` holds OpenCode's profile data for the core (checked against `agent/profile.json` by `tests/test_alignment.py`), the fixed XDG bases, the restricted `OPENCODE_DISABLE_*` switches and five hooks: `agent_validate` (`OPENCODE_CONTAINER_PROVIDER`, the integration opt-ins, YOLO with a host `OPENCODE_PERMISSION`), `agent_mounts` (the read-only integrations), `agent_environment` (native variables, the provider set in unrestricted mode), `agent_approval_bypass` (`OPENCODE_PERMISSION={"*":"allow"}`) and `agent_help`. Launcher behavior belongs in the core: change it in `sandbox-container` and adopt the new tag, never here.
 - `agent/profile.json` and `agent/policies/default.json` hold every OpenCode-specific value used by the shared network code: identity, images, state layout and the four provider profiles.
-- `Containerfile` owns the generic image: the digest-pinned base, the common toolset, and the pinned OpenCode (`1.18.3`) and OpenSpec (`1.16.0`) npm packages; `.containerignore` is its default-deny build-context allowlist. The image contains no caller identity and its entrypoint is `opencode`.
+- `Containerfile` owns the generic image: the digest-pinned base, the common toolset, and the pinned OpenCode (`1.19.5`) and OpenSpec (`2.0.0`) npm packages; `.containerignore` is its default-deny build-context allowlist. The image contains no caller identity and its entrypoint is `opencode`.
 - `tests/test_image_pins.py` rejects floating image inputs, a missing toolset package and an OpenCode version that differs from the policy's `tested.cli`.
 - `README.md` documents setup, usage and security; keep it synchronized with runtime behavior and trust the scripts when they disagree.
 - `openspec/specs/` contains current behavior contracts; `openspec/changes/` holds active proposals and dated archives.
@@ -56,7 +56,7 @@ export OPENCODE_CONTAINER_NETWORK=unrestricted
 podman ps --all --filter label=io.opencode-container.session
 ```
 
-The first command must print `1.18.3`. Start and quit the second command interactively; `--version` does not initialize OpenTUI and cannot catch renderer failures. The final command must show no test-owned wrapper container; preserve any preexisting sessions. ShellCheck may be run through Podman when unavailable on the host.
+The first command must print `1.19.5`. Start and quit the second command interactively; `--version` does not initialize OpenTUI and cannot catch renderer failures. The final command must show no test-owned wrapper container; preserve any preexisting sessions. ShellCheck may be run through Podman when unavailable on the host.
 
 ## Coding Style & Naming Conventions
 
@@ -121,7 +121,7 @@ The host must provide GNU coreutils `timeout` for bounded session cleanup. Use `
 
 ### Image inspection and build context
 
-Keep the pinned versions in `Containerfile` (`OPENCODE_VERSION=1.18.3`, `OPENSPEC_VERSION=1.16.0`) and the base digest; change them only through the README "Updating pinned image inputs" procedure, re-reading the OpenCode provider metadata and permission merge behavior. `OPENCODE_CONTAINER_IMAGE` overrides the image name; builds pass no build arguments. Only image-exists status 1 triggers an automatic build, and only under exact `OPENCODE_CONTAINER_MAINTENANCE=1`; other engine/storage errors stop startup. Explicit refresh still performs all preflights first. Builds use the wrapper's physical recipe directory. The sole `.containerignore` defaults to denying all inputs and allows only root `Containerfile`, `.containerignore`, `network/relay.py` and `network/mux.py`. Update this allowlist deliberately for any future local COPY input; nested lookalikes, credentials, state and unrelated files must remain excluded.
+Keep the pinned versions in `Containerfile` (`OPENCODE_VERSION=1.19.5`, `OPENSPEC_VERSION=2.0.0`) and the base digest; change them only through the README "Updating pinned image inputs" procedure, re-reading the OpenCode provider metadata and permission merge behavior. `OPENCODE_CONTAINER_IMAGE` overrides the image name; builds pass no build arguments. Only image-exists status 1 triggers an automatic build, and only under exact `OPENCODE_CONTAINER_MAINTENANCE=1`; other engine/storage errors stop startup. Explicit refresh still performs all preflights first. Builds use the wrapper's physical recipe directory. The sole `.containerignore` defaults to denying all inputs and allows only root `Containerfile`, `.containerignore`, `network/relay.py` and `network/mux.py`. Update this allowlist deliberately for any future local COPY input; nested lookalikes, credentials, state and unrelated files must remain excluded.
 
 ### Session lifecycle
 

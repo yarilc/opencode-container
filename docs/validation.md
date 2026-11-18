@@ -1117,3 +1117,100 @@ guard toolchain tagged from the setup image of this host.
 The installed and qualified code changes (entry script, core, agent part,
 profile) and every runtime image needs the label: installations rerun
 `--container-setup`.
+
+## OpenCode 1.19.5 and OpenSpec 2.0.0 image pins (2026-11-18)
+
+The change `pin-opencode-1-19-5` uses the newest stable npm releases at least
+72 hours old at the 2026-11-18 freeze. OpenCode 1.19.6 had yet to meet that
+threshold. OpenCode 2.x uses a different distribution and has a separate
+migration plan. The base digest remains
+`sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da`.
+
+| Image | Image ID | OpenCode | OpenSpec |
+| --- | --- | --- | --- |
+| Baseline | `4987c713b195b28ad2facae12086fb23ef19fb83507da55d4d4ab97b9e969f44` | 1.18.3 | 1.16.0 |
+| Updated | `d64a72cd560eb6b97472f61d0705b391a3ea5ca65d630b2f9d1149b19e4f430f` | 1.19.5 | 2.0.0 |
+
+The maintenance build used HTTPS Debian sources and produced build-inputs hash
+`5a57734ac0bd74841737351881fd121bb41b74f9ba9a123eb1d03ddb3fa3204d`.
+The checked Linux x64 and x64-baseline binaries have SHA-256
+`7df4e4136301f16589b0f30bf91a61380fca5f8ef22dd36570f5ebe1d4ec802c`.
+Validation used WSL2 6.6.87.2 with Podman client 4.3.1, rootless server 4.9.3,
+and Netavark.
+
+### Provider metadata and CLI behavior
+
+The bundled catalog was read from `GET /provider` on loopback with catalog
+fetching disabled. Anthropic, OpenAI, OpenRouter, and Zen still list
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and
+`OPENCODE_API_KEY` respectively. The destination and forwarding tables still
+match the four restricted profiles. Policy revision
+`opencode-2026-11-18-v1` records this measurement.
+
+`opencode debug config` and `opencode debug agent build` reported `read: ask`
+and `bash: deny` from a disposable project configuration. Adding
+`OPENCODE_PERMISSION={"*":"allow"}` placed the wildcard last and made the
+effective rules `allow` for both. This matched 1.18.3. The 1.19.5 CLI accepted
+`--auto` on the default interface and `run`, and rejected it with
+`debug paths`. An actual `run --auto` attempted CONNECT to `api.openai.com`
+through the loopback fixture proxy.
+
+### Endpoint and optional-traffic measurements
+
+Both image versions ran in containers with `--network=none`, fresh XDG state,
+dummy keys, and a loopback logging proxy that rejected every request with HTTP
+403. The measurements used `autoupdate: true` and `share: "auto"`. The
+per-provider CONNECT targets were identical across versions and with all five
+controls set or unset.
+
+| Profile | Model | Provider host |
+| --- | --- | --- |
+| `anthropic-api` | `anthropic/claude-sonnet-4-5` | `api.anthropic.com` |
+| `openai-api` | `openai/gpt-5` | `api.openai.com` |
+| `openrouter-api` | `openrouter/openai/gpt-5` | `openrouter.ai` |
+| `opencode-zen` | `opencode/gpt-5` | `opencode.ai` |
+
+| Additional CONNECT traffic | 1.18.3 | 1.19.5 |
+| --- | --- | --- |
+| `run` with all five controls unset | `models.dev`, `opncd.ai`, `registry.npmjs.org` | `models.opencode.ai`, `registry.npmjs.org` |
+| `run` with all five controls set | `registry.npmjs.org` | `registry.npmjs.org` |
+| `models` with controls unset | `models.dev` | `models.opencode.ai` |
+| `models` with controls set | None | None |
+| Explicit `upgrade --method npm`, either setting | `registry.npmjs.org` | `registry.npmjs.org` |
+
+The old sharing hostname and `OPENCODE_DISABLE_SHARE` are absent from the
+checked 1.19.5 binaries. Session sharing ended in
+[1.19.1](https://github.com/anomalyco/opencode/releases/tag/v1.19.1).
+The binary and tagged sources retain the update, model fetch, built-in plugin,
+and LSP download controls. The update control suppresses the availability
+check. Since [1.19.0](https://github.com/anomalyco/opencode/releases/tag/v1.19.0),
+installation of updates requires an explicit action. A denied explicit upgrade
+in 1.19.5 printed `Couldn't check for updates` and returned 0, where 1.18.3
+returned 1. The registry remains outside the four profiles. The catalog host
+change concerns optional traffic and leaves the required destinations intact.
+
+The unchanged-tree pin suite passed all six tests, and credential-free unit
+discovery passed with 456 cases and 76 skips. The updated pin suite passed all
+six tests. The reference ShellCheck run emitted the same 71 existing findings
+before and after the changes (14 in the shared core and 32 and 25 in the
+shared launcher fixtures).
+
+### Acceptance checks
+
+| Check | Result |
+| --- | --- |
+| Credential-free unit discovery on the updated image | Passed, 456 cases with 76 skips, matching the baseline |
+| Host `tests.test_reference_copy` and `tests.test_alignment` | Passed all 22 tests with the reference checkout available |
+| `bash tests/run-runtime.sh --wrapper` | Passed all 121 tests |
+| `bash tests/run-runtime.sh --shared` | Passed, 288 cases with 29 skips |
+| `bash tests/run-runtime.sh --setup` | Passed all 67 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed both tests |
+| `bash tests/run-runtime.sh` | Passed all 23 tests, including image smoke and the OpenTUI renderer |
+| `bash tests/run-runtime.sh --qualification` | Passed all 29 tests |
+| `bash tests/run-runtime.sh --network` | Passed all 22 tests, including TLS binding, OpenTUI in both state modes, and a tool call through a synthetic API |
+| `bash tests/run-runtime.sh --guard` | Passed, 20 cases with the opt-in 305-second idle case skipped |
+| `--container-qualify` on a disposable offline installation | Returned `locally-qualified` for the updated image |
+| Interactive OpenTUI with `--auto` in the qualified offline session | Displayed the welcome prompt and exited with status 0 |
+| Offline OpenSpec planning round trip | `init --tools none`, `new change`, `validate --all --strict`, and `list --json` passed. The temporary change used `skip_specs: true` |
+| `git diff --check` | Passed |
+| `openspec validate pin-opencode-1-19-5 --strict` | Passed |

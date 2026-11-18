@@ -775,7 +775,7 @@ os.execv(real,[real,*args])
                                             env=values | {'OPENCODE_CONTAINER_YOLO': yolo}, input='',
                                             text=True, capture_output=True, timeout=60)
                     self.assert_success(result)
-                    self.assertEqual(result.stdout.strip(), '1.18.3')
+                    self.assertEqual(result.stdout.strip(), '1.19.5')
             self.assertFalse(list(self.runtime.iterdir()))
 
     def test_actual_opencode_bash_tool_with_synthetic_chat_api(self):

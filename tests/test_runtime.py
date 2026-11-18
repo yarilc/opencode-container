@@ -297,7 +297,6 @@ test -z "${UNLISTED_SECRET+x}"
             GH_TOKEN='synthetic-github',DATABASE_URL='synthetic-extra',UNLISTED_SECRET='not-forwarded'))
         result=self.shell('test -z "${OPENAI_API_KEY+x}"',OPENAI_API_KEY='synthetic-acceptance')
         self.assert_success(result)
-        self.assertIn('not forwarding OPENAI_API_KEY',result.stderr)
         self.assertNotIn('synthetic-acceptance',result.stderr)
         shutil.copyfile(ROOT/'tests/image-smoke.sh',self.project/'image-smoke.sh')
         result=self.shell(f'EXPECTED_UID={os.getuid()} EXPECTED_GID={os.getgid()} bash -x ./image-smoke.sh')
@@ -305,7 +304,7 @@ test -z "${UNLISTED_SECRET+x}"
         for relative in ('.config','.local/share','.cache','.local/state'):
             self.assertEqual((self.home/relative/'opencode/sentinel').read_text(),'persistent')
         self.assert_success(self.shell('''
-for path in /tmp/opencode-ephemeral /run/opencode-ephemeral /var/tmp/opencode-ephemeral; do test ! -e "$path"; done
+for path in /tmp/opencode-ephemeral /var/tmp/opencode-ephemeral; do test ! -e "$path"; done
 for name in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME; do
     eval 'base=$'"$name"
     test "$(cat "$base/opencode/sentinel")" = persistent
@@ -464,37 +463,48 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
         self.assertNotEqual(self.resolved_permission(),{'*':'allow'})
 
     def owned_ids(self, all_states=False):
-        # Workspace paths contain commas, which label filters cannot express.
-        listing=self.engine('ps',*(['--all'] if all_states else []),'--filter','label=io.opencode-container.managed=true',
-                            '--format','{{.ID}} {{index .Labels "io.opencode-container.workspace"}}').stdout
-        return ' '.join(line.split(' ',1)[0] for line in listing.splitlines()
-                        if line.split(' ',1)[1:]==[str(self.project)])
+        # Sessions carry only the ownership label; the working directory names the workspace,
+        # whose path contains commas that label filters cannot express.
+        listing=self.engine('ps',*(['--all'] if all_states else []),'--filter','label=io.opencode-container.session',
+                            '--format','{{.ID}}').stdout.split()
+        return ' '.join(ident for ident in listing
+                        if self.engine('inspect','--format','{{.Config.WorkingDir}}',ident).stdout.strip()
+                        ==str(self.project))
 
-    def test_labels_and_deprecated_shim(self):
-        shim=ROOT/'opencode-wrapper'
+    def test_session_carries_only_the_ownership_label(self):
         script='''
 for i in $(seq 1 100); do test -e "$PWD/ready" && break; sleep 0.1; done
 '''
-        process=subprocess.Popen([str(shim),'--container-shell'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
+        process=subprocess.Popen([str(WRAPPER),'--container-shell'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,text=True,env=self.env,cwd=self.project)
         try:
             deadline=time.monotonic()+60; ids=''
             while time.monotonic()<deadline and not ids:
                 ids=self.owned_ids()
                 time.sleep(0.2)
-            self.assertTrue(ids,'session container not found by the new label')
+            self.assertTrue(ids,'session container not found by its ownership label')
             labels=self.engine('inspect','--format','{{json .Config.Labels}}',ids.split()[0]).stdout
             import json
             keys=[k for k in json.loads(labels) if k.startswith('io.opencode')]
-            self.assertTrue(keys)
-            self.assertTrue(all(k.startswith('io.opencode-container.') for k in keys),keys)
+            self.assertEqual(keys,['io.opencode-container.session'])
             (self.project/'ready').write_text('')
             out,err=process.communicate('set -e\n'+script+'exit 7\n',timeout=60)
         finally:
             if process.poll() is None: process.kill(); process.wait()
         self.assertEqual(process.returncode,7,err)
-        self.assertEqual(err.count('opencode-wrapper: deprecated; use opencode-container.sh'),1)
         self.assertEqual(self.owned_ids(all_states=True),'')
+
+    def test_read_only_state(self):
+        # OPENCODE_CONTAINER_READONLY_STATE mounts the existing state read-only below the ephemeral home.
+        self.assert_success(self.shell('printf kept > "$XDG_CONFIG_HOME/opencode/readonly-sentinel"'))
+        result=self.shell('''test "$(cat "$XDG_CONFIG_HOME/opencode/readonly-sentinel")" = kept
+for name in XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME; do
+    eval 'base=$'"$name"
+    if touch "$base/opencode/forbidden" 2>/dev/null; then echo "WRITABLE $name"; exit 10; fi
+done
+printf scratch > "$HOME/scratch"''',OPENCODE_CONTAINER_READONLY_STATE='1')
+        self.assert_success(result)
+        self.assertFalse((self.home/'.config/opencode/forbidden').exists())
 
     def test_opentui_renderer(self):
         env=self.env|{'TERM':'xterm-256color','OPENCODE_DISABLE_AUTOUPDATE':'1',

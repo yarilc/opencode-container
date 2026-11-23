@@ -3,6 +3,7 @@
 ## Project Structure & Module Organization
 
 - `opencode-container.sh` is the thin entry script shared by every wrapper: it only sources `launcher/core.sh` with `agent/launcher.sh`. The shared launcher core owns runtime policy: network mode admission, mounts, hardening, environment forwarding, socket handling, naming, labels and cleanup; restricted preparation, proxy lifecycle and restricted container arguments come from `network/session.py`. `agent/launcher.sh` holds OpenCode's profile data for the core (checked against `agent/profile.json` by `tests/test_alignment.py`), the fixed XDG bases, the restricted `OPENCODE_DISABLE_*` switches and five hooks: `agent_validate` (`OPENCODE_CONTAINER_PROVIDER`, the integration opt-ins, YOLO with a host `OPENCODE_PERMISSION`), `agent_mounts` (the read-only integrations), `agent_environment` (native variables, the provider set in unrestricted mode), `agent_approval_bypass` (`OPENCODE_PERMISSION={"*":"allow"}`) and `agent_help`. Launcher behavior belongs in the core: change it in `sandbox-container` and adopt the new tag, never here.
+- `opencode-container.ps1` is the thin Windows entry, identical in every wrapper under the wrapper's name: it runs the shared shim `launcher/windows/core.ps1`, which starts the managed installation inside a Podman machine's WSL distribution through `launcher/windows/bootstrap.sh`, and runs sessions and setup in the machine's systemd namespaces through `launcher/windows/enter.sh`. Windows supports every network mode that setup prepared, without Podman delegation; see the README's Windows section. `launcher/windows/` is shared like `launcher/core.sh`.
 - `agent/profile.json` and `agent/policies/default.json` hold every OpenCode-specific value used by the shared network code: identity, images, state layout and the four provider profiles.
 - `Containerfile` owns the generic image: the digest-pinned base, the common toolset, and the pinned OpenCode (`1.19.5`) and OpenSpec (`2.0.0`) npm packages; `.containerignore` is its default-deny build-context allowlist. The image contains no caller identity and its entrypoint is `opencode`.
 - `tests/test_image_pins.py` rejects floating image inputs, a missing toolset package and an OpenCode version that differs from the policy's `tested.cli`.
@@ -17,13 +18,13 @@
 `test_tls_client_hello.py`, `test_tls_proxy.py`, `test_platform.py`,
 `test_qualification.py`, `test_guard.py`, `test_session.py`,
 `test_network_feasibility.py`, `test_toolchains.py` and their fixtures) are copied unchanged from
-`sandbox-container` at tag `sandbox-ref-25`. Never edit them here, and never add
+`sandbox-container` at tag `sandbox-ref-28`. Never edit them here, and never add
 an agent identifier (`opencode`, `anthropic`, `openai`, `openrouter`) to them.
 The shared `setup/toolchains.py` manages the operator toolchain library, mounted
 read-only at `/toolchains`; the launcher owns only its dispatch, mount and
 environment. Fix a defect in `sandbox-container` first, then copy the files again and update
 the manifest in `tests/test_reference_copy.py`. OpenCode values come only from:
-- `agent/`, the wrapper, `Containerfile` and `.containerignore`;
+- `agent/`, the entry scripts (`opencode-container.sh`, and `opencode-container.ps1`, the same text in every wrapper under the wrapper's name), `Containerfile` and `.containerignore`;
 - the per-agent tests: `test_wrapper.py`, `test_runtime.py`,
   `test_network_runtime.py`, `network_tls_fixture.py`, `test_setup_runtime.py`,
   `test_image_pins.py`, `test_reference_copy.py` and `run-runtime.sh`.
@@ -39,7 +40,22 @@ Run static shell checks first:
 
 ```bash
 bash -n opencode-container.sh agent/launcher.sh
+bash ../sandbox-container/tools/shellcheck.sh .   # ShellCheck at warning level
+bash ../sandbox-container/tools/powershell.sh .   # PSScriptAnalyzer and shim tests
 ```
+
+Every tracked `*.sh` file, the shared `launcher/core.sh` and launcher fixtures
+included, passes `tools/shellcheck.sh` of `sandbox-container` (pinned
+ShellCheck, warning level). OpenCode's agent part `agent/launcher.sh` starts
+with `# shellcheck shell=bash disable=SC2034,SC2154`, because the core reads its
+data and defines the state its hooks read.
+
+Every tracked `*.ps1` file passes `tools/powershell.sh` of `sandbox-container`
+(pinned PSScriptAnalyzer, warning level), which also runs the shared shim tests
+`tests/windows/shim_tests.ps1` against a fake `wsl.exe`. The thin entry and the
+shim stay ASCII and run on Windows PowerShell 5.1 and PowerShell 7; Windows
+PowerShell 5.1 itself is validated on a Windows host. Scripts keep LF line
+endings through `.gitattributes`.
 
 Build the image with rootless Podman (builds through the wrapper need exact `OPENCODE_CONTAINER_MAINTENANCE=1`):
 
@@ -101,12 +117,12 @@ Use concise imperative subjects. Keep commits focused. PRs should explain behavi
 - Keep the root filesystem read-only. Only the workspace and OpenCode state directories are host-writable. `.agents` and `/etc/opencode` are read-only mounts only on exact `OPENCODE_CONTAINER_AGENTS_DIR=1` / `OPENCODE_CONTAINER_SYSTEM_CONFIG=1`; never mount `~/.claude` or another agent's state.
 - Keep `native.exec_tmp: true` in the profile, so `/tmp` and the shared-state home stay executable: OpenTUI extracts a shared library there and loads it at startup.
 - Keep `--cap-drop=all`, `no-new-privileges`, the pinned image inputs and by-name forwarding; never add `--privileged` or add a capability back.
-- Validate `OPENCODE_CONTAINER_MEMORY_LIMIT` (4g), `OPENCODE_CONTAINER_CPU_LIMIT` (2), `OPENCODE_CONTAINER_PIDS_LIMIT` (512) and `OPENCODE_CONTAINER_RUN_TIMEOUT` before engine queries with the Claude `sandbox-ref-5` rules and messages; request each budget only when the engine delegates its cgroup v2 controller (`Host.CgroupControllers`), announce unenforced ones, and never require host changes to delegate them; inspect the created container and start it only when enforced budgets match and unenforced ones are absent; print the lifetime notice while keeping the client status.
-- Refuse a workspace or worktree parent that physically is `/`, a system directory, `/tmp`, the physical home or a `/mnt/<letter>` drive root, before engine queries or state creation, unless exactly `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1`, which warns.
+- Validate `OPENCODE_CONTAINER_MEMORY_LIMIT` (4g), `OPENCODE_CONTAINER_CPU_LIMIT` (2), `OPENCODE_CONTAINER_PIDS_LIMIT` (512) and `OPENCODE_CONTAINER_RUN_TIMEOUT` before engine queries with the Claude `sandbox-ref-5` rules and messages; request each budget only when the engine delegates its cgroup v2 controller (`Host.CgroupControllers`), announce unenforced ones, and never require host changes to delegate them. Reported controllers count as delegated only with the `systemd` cgroup manager (`Host.CgroupManager`): a rootless `cgroupfs` engine reports controllers but applies no limits, so it delegates none (`delegated()` in `network/agent_budgets.py`, mirrored in `launcher/core.sh`). The process budget alone falls back to a soft and hard process rlimit (`--ulimit nproc`) when the engine kernel (`Host.Kernel`) is Linux 5.14 or later, which counts it per container; the mechanism (`cgroup`, `rlimit` or `none`) is one rule in `network/agent_budgets.py` and `launcher/core.sh`, verified and qualified like a cgroup budget; inspect the created container and start it only when enforced budgets match and unenforced ones are absent; print the lifetime notice while keeping the client status.
+- Refuse a workspace or worktree parent that physically is `/`, a system directory, `/tmp`, the physical home, a `/mnt/<letter>` drive root or a Windows system or profile folder on such a drive, before engine queries or state creation, unless exactly `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE=1`, which warns.
 - Do not replace existing containers. Names are `<sanitized-workspace-basename>-N`, where `N` is one greater than the highest existing suffix; reserve names atomically with `podman create`.
 - One generic image (`OPENCODE_CONTAINER_IMAGE`, default `localhost/opencode-cli:latest`); the numeric identity is set only at launch with `--userns=keep-id --user UID:GID`. Images carry the `build-inputs-hash` label; a stale or unlabeled image is refused until `--container-build` under maintenance.
 - Sessions use `HOME=/opencode-home` with XDG bases below it. By default it is a 512 MiB exec tmpfs with the four validated host OpenCode directories (`~/.config/opencode` or `OPENCODE_CONTAINER_CONFIG_DIR`, `~/.local/share/opencode`, `~/.cache/opencode`, `~/.local/state/opencode`; host `XDG_*_HOME` does not relocate them) bound at fixed paths below it; a nonempty `OPENCODE_CONTAINER_STATE_DIR` instead binds a private, validated, non-overlapping host directory as the persistent home and conflicts with `OPENCODE_CONTAINER_CONFIG_DIR`.
-- Forward environment variables by name only from the base allowlist, in unrestricted mode the provider profile selected with `OPENCODE_CONTAINER_PROVIDER`, and names in `OPENCODE_CONTAINER_ENV_VARS`; never forward GitHub tokens or other providers' keys by default, and never introduce `--env-host`. Profile variable sets follow the pinned OpenCode version's provider metadata; re-read them when the version changes.
+- Forward environment variables by name only from the base allowlist, in unrestricted mode the provider profile selected with `OPENCODE_CONTAINER_PROVIDER`, and names in `OPENCODE_CONTAINER_ENV_VARS`; never forward GitHub tokens or other providers' keys by default, and never introduce `--env-host`. Profile variable sets follow the pinned OpenCode version's provider metadata; re-read them when the version changes. From the Windows entry, the shared shim forwards only `OPENCODE_CONTAINER_*`, the four method keys and the names in `OPENCODE_CONTAINER_ENV_VARS`, so the native and provider variables need that list there; document this, and never work around it in OpenCode's files.
 - `OPENCODE_CONTAINER_YOLO` accepts `1/true/yes` and `''/0/false/no` case-insensitively and rejects other values before engine queries. Enabled, it adds the literal `OPENCODE_PERMISSION={"*":"allow"}` after forwarding, outside shell mode and the qualification probe, and refuses a host `OPENCODE_PERMISSION`; disabled, it adds nothing. YOLO and delegation are independent and YOLO changes no mount or forwarding.
 
 ### State and environment contracts

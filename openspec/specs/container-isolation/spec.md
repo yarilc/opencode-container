@@ -184,27 +184,36 @@ The wrapper SHALL NOT mount `~/.claude`, or any path below it, into an OpenCode 
 - **WHEN** offline or provider mode runs with `OPENCODE_CONTAINER_ENV_VARS="HTTPS_PROXY SSL_CERT_FILE OPENCODE_DISABLE_AUTOUPDATE"`
 - **THEN** the wrapper warns that each name is skipped, and the session keeps the helper, CA and protected values
 
+#### Scenario: Native variables from the Windows entry
+- **WHEN** a session starts from `opencode-container.ps1` with `$env:OPENCODE_CONFIG_CONTENT` set in PowerShell
+- **THEN** the session has no `OPENCODE_CONFIG_CONTENT` while `OPENCODE_CONTAINER_ENV_VARS` does not list it
+- **AND** with `$env:OPENCODE_CONTAINER_ENV_VARS = 'OPENCODE_CONFIG_CONTENT'` the session receives it by name, as on Linux
+
 ### Requirement: Exposure controls are documented
-Wrapper help and the README SHALL list `OPENCODE_CONTAINER_PROVIDER` with its accepted values, `OPENCODE_CONTAINER_ENV_VARS`, `OPENCODE_CONTAINER_AGENTS_DIR` and `OPENCODE_CONTAINER_SYSTEM_CONFIG`. The README SHALL give the provider-to-variable table, state that `~/.claude` is never mounted, and describe the migration for users who relied on the earlier mounts and forwarding. Help SHALL remain free of engine queries and state creation.
+Wrapper help and the README SHALL list `OPENCODE_CONTAINER_PROVIDER` with its accepted values, `OPENCODE_CONTAINER_ENV_VARS`, `OPENCODE_CONTAINER_AGENTS_DIR` and `OPENCODE_CONTAINER_SYSTEM_CONFIG`. The README SHALL give the provider-to-variable table, state that `~/.claude` is never mounted, state that from the Windows entry OpenCode's native variables and the variables of `OPENCODE_CONTAINER_PROVIDER` reach a session only when `OPENCODE_CONTAINER_ENV_VARS` lists them, and describe the migration for users who relied on the earlier mounts and forwarding. Help SHALL remain free of engine queries and state creation.
 
 #### Scenario: Operator reads wrapper help
 - **WHEN** the operator runs `--container-help`
 - **THEN** the output names the four variables and the accepted provider values
 - **AND** no engine query or state creation occurs
 
+#### Scenario: Operator reads about variables from Windows
+- **WHEN** the operator reads the README's Windows section
+- **THEN** it states that `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`, `OPENCODE_SERVER_USERNAME`, `OPENCODE_SERVER_PASSWORD`, the `OPENCODE_DISABLE_*` controls and the provider variables need `OPENCODE_CONTAINER_ENV_VARS` there, and that path values must be distribution paths
+
 ### Requirement: Sessions have explicit resource budgets
-Every OpenCode and shell container SHALL be created with a memory limit, a CPU limit and a process limit for each budget whose cgroup v2 controller (`memory`, `cpu`, `pids`) the verified rootless engine reports as available. The defaults SHALL be 4 GiB memory, 2 CPUs and 512 processes. `OPENCODE_CONTAINER_MEMORY_LIMIT`, `OPENCODE_CONTAINER_CPU_LIMIT` and `OPENCODE_CONTAINER_PIDS_LIMIT` SHALL override them. Only an unset variable SHALL select its default; no value SHALL disable a budget, and only a missing controller SHALL leave it unenforced.
+Every OpenCode and shell container SHALL be created with a memory limit, a CPU limit and a process limit for each budget whose cgroup v2 controller (`memory`, `cpu`, `pids`) the verified rootless engine delegates. The defaults SHALL be 4 GiB memory, 2 CPUs and 512 processes. `OPENCODE_CONTAINER_MEMORY_LIMIT`, `OPENCODE_CONTAINER_CPU_LIMIT` and `OPENCODE_CONTAINER_PIDS_LIMIT` SHALL override them. Only an unset variable SHALL select its default; no value SHALL disable a budget, and only a missing controller SHALL leave it unenforced.
 
 #### Scenario: Accepted formats
 - **WHEN** the operator sets a budget variable
 - **THEN** memory accepts a positive integer with unit `k`, `m` or `g`, CPU accepts a positive decimal with at most three fractional digits up to 1024, and the process limit accepts an integer from 1 to 4194304
 
 #### Scenario: Default budgets
-- **WHEN** a session starts with none of the budget variables set on an engine reporting the `cpu`, `memory` and `pids` controllers
+- **WHEN** a session starts with none of the budget variables set on an engine delegating the `cpu`, `memory` and `pids` controllers
 - **THEN** the container is created with 4 GiB memory, 2 CPUs and 512 processes
 
 #### Scenario: Operator overrides budgets
-- **WHEN** the operator sets `OPENCODE_CONTAINER_MEMORY_LIMIT=8g`, `OPENCODE_CONTAINER_CPU_LIMIT=1.5` and `OPENCODE_CONTAINER_PIDS_LIMIT=1024` on an engine reporting all three controllers
+- **WHEN** the operator sets `OPENCODE_CONTAINER_MEMORY_LIMIT=8g`, `OPENCODE_CONTAINER_CPU_LIMIT=1.5` and `OPENCODE_CONTAINER_PIDS_LIMIT=1024` on an engine delegating all three controllers
 - **THEN** the container is created with exactly those limits
 
 #### Scenario: Invalid or unbounded budget value
@@ -212,30 +221,32 @@ Every OpenCode and shell container SHALL be created with a memory limit, a CPU l
 - **THEN** the wrapper exits with status 1 and names the variable before any engine query, state creation or image operation
 
 #### Scenario: Controller not delegated
-- **WHEN** the verified engine does not report the `cpu` controller
-- **THEN** the container is created without a CPU limit, while the memory and process limits are still applied when their controllers are reported
-- **AND** the session continues and prints a notice naming the unenforced CPU budget and the missing controller
+- **WHEN** the verified engine does not delegate the `cpu` controller
+- **THEN** the container is created without a CPU limit, while the memory and process limits are still applied when their controllers are delegated
+- **AND** the session continues and prints a notice naming the unenforced CPU budget and why it is unenforced
 
 #### Scenario: Process controller not delegated
-- **WHEN** the verified engine does not report the `pids` controller
-- **THEN** the container is created with an explicitly unlimited process setting, so no engine default requests the missing controller
+- **WHEN** the verified engine does not delegate the `pids` controller
+- **THEN** the container is created with an explicitly unlimited cgroup process setting, so no engine default requests the missing controller
+- **AND** the process budget follows the process rlimit fallback
 
 ### Requirement: Resource budgets are verified, not assumed
-Before starting the application, each launch SHALL inspect the created container and require each enforced budget to equal its selected value and each unenforced budget to be absent. A mismatch or missing enforced limit SHALL stop startup with an actionable diagnostic, without a retry using weaker limits. Runtime verification SHALL measure the effective cgroup v2 limits inside the session in the same way.
+Before starting the application, each launch SHALL inspect the created container and require each cgroup-enforced budget to equal its selected value and each budget whose controller is not delegated to have no cgroup limit. A mismatch or missing enforced limit SHALL stop startup with an actionable diagnostic, without a retry using weaker limits. Runtime verification SHALL measure the effective cgroup v2 limits inside the session in the same way.
 
 #### Scenario: Engine ignores a budget
-- **WHEN** the created container reports no limit or a different limit for a budget whose controller the engine reports as available
+- **WHEN** the created container reports no limit or a different limit for a budget whose controller the engine delegates
 - **THEN** the wrapper removes only its own container and exits non-zero before the application starts
 - **AND** the diagnostic names rootless cgroup v2 controller delegation and the controllers the engine reported
 
 #### Scenario: Unenforced budget unexpectedly present
-- **WHEN** the created container reports a limit for a budget whose controller the engine does not report
+- **WHEN** the created container reports a cgroup limit for a budget whose controller the engine does not delegate
 - **THEN** the wrapper removes only its own container and exits non-zero before the application starts
 
 #### Scenario: Effective limits are measured
-- **WHEN** the real-engine runtime checks run a session with default and overridden budgets on an engine reporting all three controllers
-- **THEN** the container's cgroup v2 `memory.max`, `pids.max` and `cpu.max` match the selected budgets
-- **AND** a process count beyond the process limit fails inside the session
+- **WHEN** the real-engine runtime checks run a session with default and overridden budgets
+- **THEN** the container's cgroup v2 `memory.max`, `pids.max` and `cpu.max` match the selected budgets for every delegated controller, and are absent or unlimited for the others
+- **AND** on the process rlimit fallback, the session's soft and hard process rlimit equal the selected process budget
+- **AND** a process count beyond the process limit fails inside the session, unless the process budget is unenforced
 
 ### Requirement: Isolated persistent state option
 `OPENCODE_CONTAINER_STATE_DIR` SHALL select a private host directory mounted read/write as the persistent `/opencode-home`, replacing the shared state, or with `OPENCODE_CONTAINER_READONLY_STATE` read-only below an ephemeral home. The wrapper SHALL check it lexically (absolute, no colon, CR or LF) before engine queries, then create and validate it like shared state before image operations, without repairing permissions or importing credentials. Every child the launcher uses below it, and the CA mount parent, SHALL be resolved before creation, SHALL stay inside it and SHALL be private. It SHALL NOT overlap the workspace mount and SHALL conflict with a nonempty `OPENCODE_CONTAINER_CONFIG_DIR`; an empty value selects shared state.
@@ -271,13 +282,18 @@ Before starting the application, each launch SHALL inspect the created container
 - **THEN** the wrapper exits without creating the directory
 
 ### Requirement: Hardening controls are documented
-Wrapper help and the README SHALL document the budget variables with defaults and accepted formats, the lifetime variable, the state directory option, the unsafe-workspace override with the refused directories, and that capabilities are dropped in every mode. They SHALL state that budgets and tmpfs sizes do not bound workspace or state storage growth. Help SHALL remain free of engine queries and state creation.
+Wrapper help and the README SHALL document the budget variables with defaults and accepted formats, the lifetime variable, the state directory option, the unsafe-workspace override with the refused directories, and that capabilities are dropped in every mode. They SHALL document the process rlimit fallback, its per-session scope, the condition under which it applies, and that memory and CPU have no fallback. They SHALL state that budgets and tmpfs sizes do not bound workspace or state storage growth. Help SHALL remain free of engine queries and state creation.
 
 #### Scenario: Operator reads wrapper help
 - **WHEN** the operator runs `--container-help`
 - **THEN** the output lists `OPENCODE_CONTAINER_MEMORY_LIMIT`, `OPENCODE_CONTAINER_CPU_LIMIT`, `OPENCODE_CONTAINER_PIDS_LIMIT`, `OPENCODE_CONTAINER_RUN_TIMEOUT`, `OPENCODE_CONTAINER_STATE_DIR` and `OPENCODE_CONTAINER_ALLOW_UNSAFE_WORKSPACE` with their defaults
 - **AND** it states that capabilities are dropped and budgets do not limit persistent storage
 - **AND** no engine query or state creation occurs
+
+#### Scenario: Operator reads about the process rlimit fallback
+- **WHEN** the operator reads the README or wrapper help
+- **THEN** it states that, without the `pids` controller, the process budget is enforced through the process rlimit per session when the host counts it per container
+- **AND** it states that the usable process count is slightly below the budget because of container startup tasks
 
 ### Requirement: Engine default secrets mount is masked
 Every OpenCode and shell container SHALL be created with an empty read-only tmpfs at `/run/secrets`, in every network mode and with or without Podman access. An engine default mount there, such as RHEL subscription secrets from `mounts.conf`, SHALL then be neither visible nor writable. No host configuration change SHALL be required.
@@ -326,3 +342,63 @@ With `OPENCODE_CONTAINER_READONLY_STATE` enabled (`1`, `true` or `yes`, any case
 #### Scenario: Invalid switch value
 - **WHEN** `OPENCODE_CONTAINER_READONLY_STATE` is set to a value such as `2`
 - **THEN** the wrapper exits with status 1 naming the variable before engine queries
+
+### Requirement: Only the systemd cgroup manager delegates controllers
+A reported cgroup v2 controller SHALL count as delegated only when the verified rootless engine also reports the `systemd` cgroup manager. With `cgroupfs` or any other manager, no controller SHALL count as delegated, whatever the engine reports. An unverifiable cgroup manager response SHALL stop startup before image operations.
+
+#### Scenario: cgroupfs engine reporting every controller
+- **WHEN** a session starts on a rootless engine with the `cgroupfs` manager that reports `cpu`, `memory` and `pids`
+- **THEN** the container is created without memory, CPU or cgroup process limits
+- **AND** the session prints notices that the memory and CPU budgets are not enforced, naming the `cgroupfs` cgroup manager
+- **AND** the process budget follows the process rlimit fallback
+
+#### Scenario: systemd engine
+- **WHEN** a session starts on a rootless engine with the `systemd` manager that reports `cpu`, `memory` and `pids`
+- **THEN** the memory, CPU and cgroup process limits are applied as before
+
+#### Scenario: Unverifiable cgroup manager
+- **WHEN** the engine's cgroup manager response is empty, malformed or has more than one record
+- **THEN** the wrapper exits non-zero before image operations or container creation
+
+### Requirement: Process budget falls back to the process rlimit
+When the verified engine does not delegate the `pids` controller and the engine host counts the process rlimit per container, the agent container SHALL be created with a soft and hard process rlimit equal to the selected process budget. When per-container counting is not established, the process budget SHALL stay unenforced. The memory and CPU budgets SHALL have no fallback.
+
+#### Scenario: Process controller missing on a per-container host
+- **WHEN** a session starts with the default budgets on an engine delegating `cpu` and `memory` but not `pids`, on a host that counts the process rlimit per container
+- **THEN** the container is created with a soft and hard process rlimit of 512 and without a cgroup process limit
+- **AND** the memory and CPU limits are applied as before
+
+#### Scenario: Process controller delegated
+- **WHEN** the engine delegates the `pids` controller
+- **THEN** the process budget is enforced only by the cgroup process limit
+- **AND** the wrapper sets no process rlimit
+
+#### Scenario: Per-container counting not established
+- **WHEN** the engine does not delegate `pids` and the host is not known to count the process rlimit per container
+- **THEN** the wrapper requests neither a cgroup process limit nor a process rlimit for the container
+- **AND** the session continues with a notice that names the unenforced process budget and why the fallback was not applied
+
+#### Scenario: Memory controller missing
+- **WHEN** the engine does not delegate the `memory` controller
+- **THEN** the memory budget stays unenforced and no substitute memory limit is set
+
+#### Scenario: The session cannot raise its process rlimit
+- **WHEN** a process in a session on the fallback tries to raise its soft or hard process rlimit above the selected budget
+- **THEN** the attempt fails, because the session has no capabilities and no-new-privileges is set
+
+#### Scenario: Concurrent sessions have independent limits
+- **WHEN** two sessions on the fallback run at the same time and the first holds processes up to its limit
+- **THEN** the second session can still create processes up to its own limit
+
+### Requirement: Process rlimit fallback is verified
+When the process budget uses the rlimit fallback, each launch SHALL require the created agent container to carry a soft and hard process rlimit equal to the selected budget. Setup smoke and restricted qualification SHALL measure the same effective limit inside the agent container. A mismatch SHALL stop startup or setup with an actionable diagnostic, without a retry using weaker limits.
+
+#### Scenario: Engine drops the process rlimit
+- **WHEN** the created container reports no process rlimit, or a soft or hard value different from the selected budget
+- **THEN** the wrapper removes only its own container and exits non-zero before the application starts
+- **AND** the diagnostic names the process rlimit fallback
+
+#### Scenario: Effective rlimit is measured
+- **WHEN** setup smoke or the restricted qualification probe runs inside an agent container on the fallback
+- **THEN** it reads the effective soft and hard process rlimit and requires both to equal the selected budget
+- **AND** it requires the cgroup process interface to be absent or unlimited

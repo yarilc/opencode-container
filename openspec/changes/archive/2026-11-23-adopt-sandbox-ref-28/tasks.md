@@ -66,8 +66,8 @@
 
 ## 4. Record, merge and parity
 
-- [ ] 4.1 Add the `sandbox-ref-28` adoption section to `docs/validation.md`, from the tool's template, with every result of tasks 2.1 to 2.3 and 3.2. Set OpenCode's parity row to "Adopted `sandbox-ref-28`". Commit with the tool's message and merge into `main`. Verify: `tests/test_reference_copy.py` passes on `main`.
-- [ ] 4.2 Copy OpenCode's parity row into `sandbox-container`, `claude-container`, `codex-container`, `antigravity-container` and `pi-container`, with one commit on `main` in each. Verify: the reference, Claude, Codex, Antigravity and OpenCode rows are identical in the six repositories.
+- [x] 4.1 Add the `sandbox-ref-28` adoption section to `docs/validation.md`, from the tool's template, with every result of tasks 2.1 to 2.3 and 3.2. Set OpenCode's parity row to "Adopted `sandbox-ref-28`". Commit with the tool's message and merge into `main`. Verify: `tests/test_reference_copy.py` passes on `main`.
+- [x] 4.2 Copy OpenCode's parity row into `sandbox-container`, `claude-container`, `codex-container`, `antigravity-container` and `pi-container`, with one commit on `main` in each. Verify: the reference, Claude, Codex, Antigravity and OpenCode rows are identical in the six repositories.
 
 ## Workflow follow-up
 

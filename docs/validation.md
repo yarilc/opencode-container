@@ -1214,3 +1214,119 @@ shared launcher fixtures).
 | Offline OpenSpec planning round trip | `init --tools none`, `new change`, `validate --all --strict`, and `list --json` passed. The temporary change used `skip_specs: true` |
 | `git diff --check` | Passed |
 | `openspec validate pin-opencode-1-19-5 --strict` | Passed |
+
+## Adoption of `sandbox-ref-28`: 2026-11-23
+
+Change `adopt-sandbox-ref-28`, from `sandbox-ref-25` directly. It takes in
+`sandbox-ref-26`, `sandbox-ref-27` and `sandbox-ref-28`:
+- the process rlimit fallback and systemd-only cgroup delegation;
+- the shared launcher files passing ShellCheck;
+- Windows support on a Podman machine;
+- the Windows setup guidance for agent wrappers.
+
+Copied from `sandbox-container` tag `sandbox-ref-28` (commit `ba1ef14`):
+- updated: `launcher/core.sh`, `network/README.md`, `network/agent_budgets.py`,
+  `network/control.py`, `network/guard.c`, `network/proxy_hardening.py`,
+  `network/qualification_probe.py`, `network/qualification_records.py`,
+  `network/session.py`, `setup/common.py`, `setup/launch.py`, `setup/setup.py`,
+  `setup/smoke.py`, `tests/fake_podman.py`, both fixture `launcher.sh`,
+  `tests/test_alignment.py`, `tests/test_guard.py`, `tests/test_launcher.py`,
+  `tests/test_qualification.py`, `tests/test_session.py` and
+  `tests/test_setup.py`;
+- added: the five `launcher/windows/` files, `tests/test_windows_bootstrap.py`,
+  `tests/test_windows_enter.py` and `tests/windows/shim_tests.ps1`.
+
+The `tests/test_reference_copy.py` manifest moved to the tag. The tool also
+rewrote the Pi parity row, which stays on `sandbox-ref-25`; it was restored by
+hand.
+
+By hand, as `docs/propagation.md` says:
+- `opencode-container.ps1` is a byte-for-byte copy of `sandbox-container.ps1`;
+- `.gitattributes` was copied. The LF rewrite changed nothing: every tracked
+  file was already LF in the index and the working tree;
+- `agent/launcher.sh` already had the ShellCheck header of the reference agent
+  part, so it did not change.
+
+OpenCode's own tests changed where the shared behavior did, as in the other
+wrappers:
+- `tests/test_setup_wrapper.py` is the shared adapted file, byte for byte: the
+  files were identical before. It adds a failing `systemctl`, the budget plan
+  with the rlimit fallback and `cgroupfs`, and the case for setup without a
+  launch service;
+- `tests/test_runtime.py`: `cgroup()` and `test_effective_hardening_and_budgets`
+  follow the delegated controllers and the process mechanism, with the launch
+  notices, and `test_process_limit_enforced` uses a budget of 128 with 200
+  children.
+
+The README, `docs/setup.md` and `AGENTS.md` cover:
+- the Windows entry for OpenCode, with the four API key methods through
+  `$env:<KEY>` and keys stored with `opencode auth login`;
+- OpenCode's native variables and the variables of
+  `OPENCODE_CONTAINER_PROVIDER`, which reach a session from Windows only
+  through `OPENCODE_CONTAINER_ENV_VARS`;
+- the installer;
+- host CA trust on Windows;
+- the Windows limits, including Bitdefender;
+- the `cgroupfs` budgets, the rlimit fallback and the guard as init;
+- the setup changes.
+
+**This runner.** WSL2 `6.18.58.1-microsoft-standard-WSL2`, Podman server
+4.9.3, the `systemd` cgroup manager and controllers `[cpu memory pids]`.
+- The engine had no `localhost/opencode-cli:latest`. Its
+  `localhost/opencode-cli:setup-3450e309a6834139be0539695a028f98`
+  (`cb50f94ee11b`) predates the OpenCode 1.19.5 pin (`build-inputs-hash`
+  `b6c2cfc8...`, inputs `5a57734a...`). The adoption changes no build input.
+- `localhost/opencode-cli:latest` `da65a1a29d9f` was rebuilt with
+  `--container-build`, `build-inputs-hash` `5a57734a...`, OpenCode 1.19.5 and
+  OpenSpec 2.0.0. The runner's network intercepts TLS, so the build used host
+  CA trust with the session's CA bundle as the build secret.
+- For the guard toolchain,
+  `localhost/opencode-guard-toolchain:setup-3450e309a6834139be0539695a028f98`
+  was also tagged `localhost/opencode-guard-toolchain:development`, the name
+  that `--guard`, `--qualification` and `--network` use.
+
+| Check | Result |
+| --- | --- |
+| `python3 -m unittest tests.test_reference_copy tests.test_alignment` (host Python, siblings present) | Passed: 26 tests, no skips |
+| `bash tools/shellcheck.sh ../opencode-container`, `bash tools/powershell.sh ../opencode-container` (from `sandbox-container`) | Passed: no finding, 62 shim cases |
+| `python3 -m unittest discover -s tests` (disposable container, private executable tmpfs) | Passed: 511 tests, 84 skipped. A first run, while the operator's Windows validation loaded the computer, failed two boundary attempts of the timing-sensitive shared `test_lifetime_notice_preserves_status`, which passed in `--wrapper`; the rerun on its own passed |
+| `bash tests/run-runtime.sh --wrapper` | Passed: 125 tests, 1 skipped |
+| `bash tests/run-runtime.sh --shared` | Passed: 303 tests, 35 skipped. A first run under the same load failed the shared signal test `test_int_and_hup_forwarding`, which passed in `--wrapper`; the rerun on its own passed |
+| `bash tests/run-runtime.sh --setup` | Passed: 88 tests |
+| `bash tests/run-runtime.sh --setup-runtime` | Passed: 2 tests |
+| `bash tests/run-runtime.sh --qualification` | Passed: 31 tests |
+| `bash tests/run-runtime.sh --guard` | Passed: 25 tests, 1 skipped (`--guard-idle`) |
+| `bash tests/run-runtime.sh --network` | Passed: 22 tests |
+| `bash tests/run-runtime.sh` (`test_runtime.py`) | Passed: 23 tests, including the budget checks above |
+| `git diff --check` | Passed |
+
+**Windows** (operator, 2026-11-23). Windows WSL 3.0.5.0, kernel 6.18.58.1-1,
+Landlock ABI 7. The Podman Desktop machine `podman-machine-default` uses the
+`cgroupfs` manager, with Ubuntu running. The checkouts were snapshots of this
+branch and of `sandbox-container` in `C:\Work`.
+
+| Step | Result |
+| --- | --- |
+| Setup from `opencode-container.ps1`: provider networking with the `openrouter` method, shared state, host CA trust with `/etc/ssl/certs/ca-certificates.crt`, permission bypass on, images refreshed | The plan printed `enforced agent budgets: none`, the `cgroupfs` notices and the process rlimit for the agent (512) and the proxy (128). Images built in the machine, `Sandbox qualification: locally-qualified`, `Sandbox: ready`. Setup said `Set $env:OPENROUTER_API_KEY = '...' in PowerShell before opencode-container.ps1`, with no distribution path |
+| An OpenCode session with `$env:OPENROUTER_API_KEY` | Provider session with `openrouter-api`, OpenCode 1.19.5, model Flint (free) through OpenRouter. OpenCode ran `ls -la` on the project and read its file with the `read` tool. `$LASTEXITCODE` was 0 after `/exit` and 130 after Ctrl+C, the OpenTUI quit status already recorded on Linux. `podman ps -a` then listed no container of the session (operator) |
+| `opencode-container.ps1 run "Say Hello"` | Answered through OpenRouter |
+| Native variables: `$env:OPENCODE_CONFIG_CONTENT = '{}'`, then `--container-shell -c 'echo "${OPENCODE_CONFIG_CONTENT-unset}"'` | Printed `unset`; with `$env:OPENCODE_CONTAINER_ENV_VARS = 'OPENCODE_CONFIG_CONTENT'` it printed `{}` |
+| `windows-validate.ps1 -Checkout C:\Work\opencode-container -Install -StopMachine`, Windows PowerShell 5.1 | 55 passed, 0 failed, 1 skipped (restricted mode without a prepared installation, because setup saved provider). Installer, user `PATH`, uninstall, stopped machine, a distribution started by WSL alone, the restart with Podman, "Offline qualification", "Offline session", "Redirected input" and "One engine for sessions and the machine" passed |
+| The same without `-Install -StopMachine`, PowerShell 7.7.0 | 43 passed, 0 failed, 3 skipped |
+
+Notes:
+
+- **`registry.npmjs.org` is denied in provider sessions.** OpenCode installs
+  `@opencode-ai/plugin` in the background and the proxy refuses it
+  (`policy-denied`), as recorded on Linux. The sessions are unaffected.
+- **An empty first answer.** The first answer of the session, from the
+  preselected model `Nano Banana Pro Preview`, was empty (1.7 s); the prompt
+  was repeated with Flint (free). The proxy denied no OpenRouter request, so
+  it is a model or account matter.
+- **The `transport-closed` diagnostic.** At session end, the
+  `recent protected egress diagnostics` line with `transport-closed` is the
+  behavior already recorded on Linux.
+- **The machine keeps the method of the last setup** (`openrouter`).
+
+The installed launcher core, setup and guard change, so installations rerun
+`--container-setup`.

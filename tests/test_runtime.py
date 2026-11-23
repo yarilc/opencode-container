@@ -9,10 +9,14 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import termios
 import time
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'network'))
+import agent_budgets  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / 'opencode-container.sh'
@@ -330,14 +334,27 @@ printf kept > "$HOME/notes"
         self.assert_success(self.shell('test "$(cat "$HOME/notes")" = kept',OPENCODE_CONTAINER_STATE_DIR=str(state)))
 
     def cgroup(self, **env):
+        # A controller file the engine did not create counts as unlimited.
         result=self.shell('''
 grep -E '^(CapInh|CapPrm|CapEff|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status
-for file in memory.max pids.max cpu.max; do printf '%s=%s\n' "$file" "$(cat /sys/fs/cgroup/$file)"; done
+for file in memory.max pids.max cpu.max; do printf '%s=%s\n' "$file" "$(cat /sys/fs/cgroup/$file 2>/dev/null || echo max)"; done
+grep '^Max processes' /proc/self/limits
 ''',**env)
         self.assert_success(result)
-        return result.stdout
+        return result
+
+    def engine_budgets(self):
+        """Delegated controllers and process mechanism of the engine, by the launcher's rule."""
+        def info(template):
+            return subprocess.run(['podman', 'info', '--format', template], env=self.env, check=True,
+                                  capture_output=True, text=True, timeout=60).stdout.strip()
+        delegated = agent_budgets.delegated(info('{{.Host.CgroupControllers}}'), info('{{.Host.CgroupManager}}'))
+        return delegated, agent_budgets.process_mechanism(delegated, info('{{.Host.Kernel}}'))
 
     def test_effective_hardening_and_budgets(self):
+        # Budgets apply as the engine allows: cgroup limits only for delegated
+        # controllers, the process rlimit as fallback, and a notice otherwise.
+        controllers,mechanism=self.engine_budgets()
         for env,(memory,pids,cpu) in (({},('4294967296','512','200000 100000')),
                                       ({'OPENCODE_CONTAINER_MEMORY_LIMIT':'1g','OPENCODE_CONTAINER_CPU_LIMIT':'1.5',
                                         'OPENCODE_CONTAINER_PIDS_LIMIT':'256'},('1073741824','256','150000 100000'))):
@@ -345,21 +362,39 @@ for file in memory.max pids.max cpu.max; do printf '%s=%s\n' "$file" "$(cat /sys
                 with self.subTest(env=env,delegated=delegated):
                     extra={'OPENCODE_CONTAINER_PODMAN':delegated}
                     if delegated=='1': extra['OPENCODE_CONTAINER_PODMAN_SOCKET']=self.socket
-                    out=self.cgroup(**env,**extra)
+                    result=self.cgroup(**env,**extra)
+                    out=result.stdout
                     for field in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):
                         self.assertRegex(out,field+r':\s*0000000000000000')
                     self.assertRegex(out,r'NoNewPrivs:\s*1')
-                    self.assertIn('memory.max='+memory,out)
-                    self.assertIn('pids.max='+pids,out)
-                    self.assertIn('cpu.max='+cpu,out)
+                    self.assertIn('memory.max='+(memory if 'memory' in controllers else 'max')+'\n',out)
+                    self.assertIn('pids.max='+(pids if mechanism=='cgroup' else 'max')+'\n',out)
+                    if 'cpu' in controllers:
+                        self.assertIn('cpu.max='+cpu,out)
+                    else:
+                        self.assertRegex(out,r'cpu\.max=max\b')
+                    if mechanism=='rlimit':
+                        self.assertRegex(out,r'Max processes\s+'+pids+r'\s+'+pids+r'\s')
+                    for budget,controller in (('memory','memory'),('CPU','cpu')):
+                        notice=f'agent {budget} budget not enforced'
+                        if controller in controllers:
+                            self.assertNotIn(notice,result.stderr)
+                        else:
+                            self.assertIn(notice,result.stderr)
+                    rlimit=f'agent process budget enforced through the process rlimit ({pids} tasks'
+                    self.assertEqual(rlimit in result.stderr,mechanism=='rlimit',result.stderr)
+                    self.assertEqual('agent process budget not enforced' in result.stderr,mechanism=='none',result.stderr)
 
     def test_process_limit_enforced(self):
-        # A process budget is enforced, not just reported.
+        # A process budget is enforced, not just reported. Under the rlimit
+        # fallback, container startup also counts, so the budget leaves room.
+        if self.engine_budgets()[1]=='none':
+            self.skipTest('the engine enforces no process budget')
         result=self.shell('python3 - <<\'CHECK\'\nimport subprocess\nchildren = []\ntry:\n'
-                          '    for _ in range(80):\n        children.append(subprocess.Popen(["sleep", "30"]))\n'
+                          '    for _ in range(200):\n        children.append(subprocess.Popen(["sleep", "30"]))\n'
                           'except (BlockingIOError, OSError):\n    print("PIDS_BUDGET_ENFORCED")\n'
                           'finally:\n    [child.kill() for child in children]\nCHECK\n',
-                          OPENCODE_CONTAINER_PIDS_LIMIT='32')
+                          OPENCODE_CONTAINER_PIDS_LIMIT='128')
         self.assert_success(result)
         self.assertIn('PIDS_BUDGET_ENFORCED',result.stdout)
 

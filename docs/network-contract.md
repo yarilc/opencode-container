@@ -6,16 +6,17 @@ Status: ported by the `add-network-egress` and `add-container-setup` changes.
 
 The durable contract is [network-egress](../openspec/specs/network-egress/spec.md),
 with [host-ca-trust](../openspec/specs/host-ca-trust/spec.md) and the session,
-isolation, delegation, launcher and image specifications in `openspec/specs/`.
+isolation, session container engine, launcher and image specifications in
+`openspec/specs/`.
 
 ## Reference and intentional differences
 
 The shared components are copied unchanged from `sandbox-container` at tag
-`sandbox-ref-28` (commit `ba1ef1428a57625b70bb45d55cade5f08f46eecc`):
+`sandbox-ref-36` (commit `ce2c9d28873838a4ac541da34edaf7d8b5264be4`):
 
-- `launcher/` (the shared launcher core);
+- `launcher/` (the shared launcher core, Windows entry helpers and session engine recipe);
 - `network/` (except the build output `network/bin/`);
-- `setup/`;
+- `setup/` (including `setup/engine.py` and `setup/toolchain-catalog/`);
 - the shared tests listed in that tag's `tests/test_alignment.py`.
 
 `sandbox-ref-5` is `sandbox-ref-2` plus three shared-test fixes that this port
@@ -38,21 +39,21 @@ Intentional differences are limited to per-agent files:
 
 | File | OpenCode value or behavior |
 | --- | --- |
-| `agent/profile.json` | Identity: `opencode-container`, prefix `OPENCODE_CONTAINER`, labels `io.opencode-container.*`. Images: `localhost/opencode-cli`, `localhost/opencode-egress`, `localhost/opencode-guard-toolchain`. Runtime: home `/opencode-home`, command `opencode`. State: configuration `.config/opencode` with override `OPENCODE_CONTAINER_CONFIG_DIR`, plus shared `.local/share/opencode`, `.cache/opencode` and `.local/state/opencode`. Approval: `OPENCODE_CONTAINER_YOLO`. Executable temporary storage (`native.exec_tmp`). Four API-key methods |
+| `agent/profile.json` | Identity: `opencode-container`, prefix `OPENCODE_CONTAINER`, labels `io.opencode-container.*`. Images: `localhost/opencode-cli` (engine image derived as `localhost/opencode-cli-engine`), `localhost/opencode-egress`, `localhost/opencode-guard-toolchain`. Runtime: home `/opencode-home`, command `opencode`. State: configuration `.config/opencode` with override `OPENCODE_CONTAINER_CONFIG_DIR`, plus shared `.local/share/opencode`, `.cache/opencode` and `.local/state/opencode`. Approval: `OPENCODE_CONTAINER_YOLO`. Executable temporary storage (`native.exec_tmp`). Four API-key methods |
 | `agent/policies/default.json` | `anthropic-api`, `openai-api`, `openrouter-api` and `opencode-zen`, revision `opencode-2026-11-10-v1` |
 | `opencode-container.sh` | The thin entry script, identical to the reference's apart from the wrapper name |
 | `agent/launcher.sh` | OpenCode's data for the shared core: `AGENT_EXEC=/usr/local/bin/opencode`, executable temporary storage, one credential per policy profile, the fixed XDG bases, protected `OPENCODE_DISABLE_*=1` values in restricted sessions; hooks for `OPENCODE_CONTAINER_PROVIDER`, the native variables, the read-only integrations, the YOLO permission and the help |
 | `Containerfile`, `.containerignore` | OpenCode image; copies `network/relay.py` and `network/mux.py` |
-| `tests/test_wrapper.py`, `test_runtime.py`, `image-smoke.sh`, `test_network_runtime.py`, `network_tls_fixture.py`, `run-runtime.sh`, `test_image_pins.py`, `test_reference_copy.py` | OpenCode names, synthetic OpenAI-compatible Chat Completions fixture, provider host inventories |
+| `tests/test_wrapper.py`, `test_setup_wrapper.py`, `test_setup_runtime.py`, `test_runtime.py`, `image-smoke.sh`, `test_network_runtime.py`, `network_tls_fixture.py`, `run-runtime.sh`, `test_image_pins.py`, `test_reference_copy.py` | OpenCode names, synthetic OpenAI-compatible Chat Completions fixture, provider host inventories |
 
 ## Modes
 
-| Mode | Agent access | Socket delegation |
+| Mode | Agent access | Session container engine |
 | --- | --- | --- |
-| unset or empty | `provider`; without the provider settings the launch stops with setup guidance before engine calls and state creation | Rejected |
-| `offline` | Own loopback, pipes and connected socket pairs only | Rejected |
-| `provider` | As offline, plus one preconnected channel to an exact-destination proxy | Rejected |
-| `unrestricted` (explicit only) | Ordinary runtime networking | Exact opt-in allowed |
+| unset or empty | `provider`; without the provider settings the launch stops with setup guidance before engine calls and state creation | As `provider` when configured; host delegation (`OPENCODE_CONTAINER_PODMAN=1`) rejected |
+| `offline` | Own loopback, pipes and connected socket pairs only | Private rootless engine when library holds images, sharing offline network namespace; host delegation rejected |
+| `provider` | As offline, plus one preconnected channel to an exact-destination proxy | Private rootless engine when library holds images, sharing provider network boundary; host delegation rejected |
+| `unrestricted` (explicit only) | Ordinary runtime networking | Private rootless engine when library holds images, sharing session network; host delegation (`OPENCODE_CONTAINER_PODMAN=1`) rejected |
 
 Unknown modes fail before image operations. Restricted failures never retry
 with unrestricted networking. None of the following can broaden the outer
@@ -74,7 +75,7 @@ these constraints. The image provides `bwrap` as a general tool.
 
 Restricted launches follow the Claude wrapper order:
 1. arguments;
-2. mode and delegation;
+2. mode and legacy delegation refusal;
 3. budgets and lifetime;
 4. engine verification;
 5. restricted platform queries;
@@ -151,7 +152,7 @@ The same OpenCode row appears in `sandbox-container`, `claude-container`, `codex
 | Claude | Adopted `sandbox-ref-36`: shared launcher core | Shared launcher core, mandatory bootstrap, multiplexed proxy and guided setup integrated; session container engine for image toolchains, with systemd in nested containers, host Podman delegation removed; Windows entry on a Podman machine (WSL provider) with installer and every network mode | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-22); `sandbox-ref-34` modes from a Claude session with its engine passed except the nested-engine cases and the tests that need cgroup limits, and the engine and setup runtime cases passed on the machine's engine (2026-11-25), `sandbox-ref-35` unit discovery, guard, network, feasibility and setup runtime modes passed natively, the terminal tests included, with the interrupted-creation case passing alone after timeouts in the full network run (2026-11-25), and `sandbox-ref-36` unit tests of the changed files, setup, setup runtime, qualification and wrapper modes and the engine cases of the runtime and network suites passed natively, the other modes not rerun (2026-11-26); Podman machine on Windows: setup, account login, a Claude session and the validation script on both PowerShell editions passed (2026-11-22), and the validation script on 5.1 with the session engine (2026-11-24); native Linux (Rocky 9, Podman 5.8.0, `systemd` with `memory` and `pids`, no IPv6): `sandbox-ref-35` unit discovery, guard, network, feasibility and setup runtime modes passed with the guarded terminal tests unavailable, and a terminal attached in an interactive session (2026-11-25) | Account login, reuse and refresh passed; operator session with tool use passed (2026-11-11, `anthropic-account`); real-key API unavailable |
 | Codex | Adopted `sandbox-ref-36`: shared launcher core | Shared launcher core, guard, multiplexed proxy, qualification and guided setup integrated; session container engine for image toolchains, with systemd in nested containers, host Podman delegation removed; Windows entry on a Podman machine (WSL provider) with installer and every network mode | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-22), and on `sandbox-ref-36` natively, the terminal tests and the engine cases included, with the shared and wrapper modes passing on a rerun after timing failures under load (2026-11-26); Podman machine on Windows: setup, device-code login, a Codex session, Codex's own sandbox in `unrestricted` and the validation script on both PowerShell editions passed (2026-11-22), the `sandbox-ref-36` smoke test pending (release risk) | Operator session with tool use passed (2026-11-11, `openai-account`; 2026-11-22 on Windows); refresh and real-key API checks pending; synthetic Responses API streaming and tool call passed |
 | Antigravity | Adopted `sandbox-ref-28`: shared launcher core | Shared launcher core, guard, multiplexed proxy, qualification and guided setup integrated; keyring removed; Windows entry on a Podman machine (WSL provider) with installer and every network mode, no delegation | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-23); Podman machine on Windows: setup, Google sign-in, an `agy` session with tool use, token reuse, the Gemini API key method with a dummy key and the validation script on both PowerShell editions passed (2026-11-23) | Operator session with tool use passed (2026-11-11, `google-account`, policy `antigravity-2026-11-11-v2`; 2026-11-23 on Windows); refresh and real-key Gemini API checks pending; synthetic Gemini streaming and tool call passed |
-| OpenCode | Adopted `sandbox-ref-28`: shared launcher core | Shared launcher core, guard, multiplexed proxy, qualification and guided setup integrated; Windows entry on a Podman machine (WSL provider) with installer and every network mode, no delegation | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-23); Podman machine on Windows: setup, an OpenCode session with tool use (`openrouter-api`), native variables through `OPENCODE_CONTAINER_ENV_VARS` and the validation script on both PowerShell editions passed (2026-11-23) | Operator session with tool use passed (2026-11-11, `anthropic-api`; 2026-11-23 on Windows, `openrouter-api`); the `openai-api` and `opencode-zen` profiles pending; synthetic Chat Completions streaming and tool call passed |
+| OpenCode | Adopted `sandbox-ref-36`: shared launcher core | Shared launcher core, guard, multiplexed proxy, qualification and guided setup integrated; private session container engine for image toolchains with nested systemd, host Podman delegation removed; Windows entry on a Podman machine (WSL provider) with installer and every network mode | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-23); Podman machine on Windows: setup, an OpenCode session with tool use (`openrouter-api`), native variables through `OPENCODE_CONTAINER_ENV_VARS` and the validation script on both PowerShell editions passed (2026-11-23); `sandbox-ref-36` shared manifest, alignment, static checks, OpenSpec merge preview and full non-runtime synthetic suites passed in the working session (2026-11-27), production WSL/Linux and Windows checks scheduled after closure | Operator session with tool use passed (2026-11-11, `anthropic-api`; 2026-11-23 on Windows, `openrouter-api`); the `openai-api` and `opencode-zen` profiles pending; synthetic Chat Completions streaming and tool call passed |
 | Pi | Adopted `sandbox-ref-28`: shared launcher core | Shared launcher core, guard, multiplexed proxy, qualification and guided setup integrated; Windows entry on a Podman machine (WSL provider) with installer and every network mode, no delegation | WSL ABI 3: all runner modes passed on `sandbox-ref-28` (2026-11-23); Podman machine on Windows: setup, a Pi session with tool use (`openrouter-api`), `PI_NPM_CACHE_SIZE` through `PI_CONTAINER_ENV_VARS` and the validation script on both PowerShell editions passed (2026-11-23) | Operator session with tool use passed (2026-11-11, `anthropic-api`; 2026-11-23 on Windows, `openrouter-api`); the `openai-api` and `gemini-api` profiles pending; synthetic Chat Completions streaming and tool call passed |
 
 ## Port status

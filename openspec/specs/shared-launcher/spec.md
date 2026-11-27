@@ -57,7 +57,7 @@ Every session SHALL receive, by name and only when set on the host, `OPENCODE_CO
 - **AND** in offline or provider mode `OPENCODE_DISABLE_LSP_DOWNLOAD` has the protected value `1`
 
 ### Requirement: OpenCode launcher tests cover only OpenCode's part
-OpenCode's launcher behavior SHALL be tested by the shared `tests/test_launcher.py` and `tests/fake_podman.py`, copied unchanged from the reference tag. `tests/test_wrapper.py` SHALL test only OpenCode's hooks, agent data, credential rules per policy profile and shipped policy inventories. An OpenCode launcher case that the shared tests do not cover SHALL be added to the reference first, not kept as a wrapper copy.
+OpenCode's launcher behavior (including leftover delegation refusal, session container engine wiring, and budgets) SHALL be tested by the shared `tests/test_launcher.py` and `tests/fake_podman.py`, copied unchanged from `sandbox-ref-36`. `tests/test_wrapper.py` SHALL test only OpenCode's hooks, agent data, credential rules per policy profile, shipped policy inventories, and OpenCode-specific option handling. An OpenCode launcher case that the shared tests do not cover SHALL be added to the reference first, not kept as a wrapper copy.
 
 #### Scenario: Wrapper runtime tests
 - **WHEN** `bash tests/run-runtime.sh --wrapper` runs

@@ -90,7 +90,7 @@ The wrapper MUST forward only nonempty inherited values of `TERM`, `COLORTERM`, 
 - **THEN** the session has `USER` with the caller's name, `EDITOR=nano` and `VISUAL=nano`
 
 ### Requirement: Preserve sandbox identity and hardening
-Sessions SHALL run with `--userns=keep-id --user <uid>:<gid>` set at launch, so that processes have the caller's numeric identity without an identity baked into the image. Every OpenCode and shell session SHALL drop all capabilities and enable no-new-privileges, with or without delegation and YOLO. The wrapper SHALL NOT add a capability back to resolve an incompatibility.
+Sessions SHALL run with `--userns=keep-id --user <uid>:<gid>` set at launch, so that processes have the caller's numeric identity without an identity baked into the image. Every OpenCode and shell session container SHALL drop all capabilities and enable no-new-privileges, with or without YOLO and with or without a session container engine. The wrapper SHALL NOT add a capability back to resolve an incompatibility.
 
 #### Scenario: Session identity
 - **WHEN** a session starts from the generic image
@@ -296,7 +296,7 @@ Wrapper help and the README SHALL document the budget variables with defaults an
 - **AND** it states that the usable process count is slightly below the budget because of container startup tasks
 
 ### Requirement: Engine default secrets mount is masked
-Every OpenCode and shell container SHALL be created with an empty read-only tmpfs at `/run/secrets`, in every network mode and with or without Podman access. An engine default mount there, such as RHEL subscription secrets from `mounts.conf`, SHALL then be neither visible nor writable. No host configuration change SHALL be required.
+Every OpenCode and shell container SHALL be created with an empty read-only tmpfs at `/run/secrets`, in every network mode and with or without a session container engine. An engine default mount there, such as RHEL subscription secrets from `mounts.conf`, SHALL then be neither visible nor writable. No host configuration change SHALL be required.
 
 #### Scenario: Host with a default secrets mount
 - **WHEN** the engine's `mounts.conf` maps `/usr/share/rhel/secrets` to `/run/secrets`
@@ -308,7 +308,7 @@ Every OpenCode and shell container SHALL be created with an empty read-only tmpf
 - **THEN** the session still has the empty read-only tmpfs there and behaves as before
 
 ### Requirement: Engine-provided device mounts allow pseudo-terminals
-Every OpenCode and shell container SHALL keep automatic read-only tmpfs provisioning enabled and SHALL NOT mount its own `/dev` or `devpts`, so that the engine provides `/dev` and a `devpts` that allows pseudo-terminals. It SHALL mask `/dev/shm` with an empty read-only tmpfs. Automatic provisioning SHALL add no writable path beyond the explicit temporary mounts and the engine's `/dev`.
+Every OpenCode and shell container SHALL keep automatic read-only tmpfs provisioning enabled and SHALL NOT mount its own `/dev` or `devpts`, so that the engine provides `/dev` and a `devpts` that allows pseudo-terminals. It SHALL mask `/dev/shm` with an empty read-only tmpfs. Automatic provisioning SHALL add no writable path beyond the explicit temporary mounts and the engine's `/dev`. When a session joins its container engine's network namespace, Podman's read-only bind-mount of host `/sys` SHALL be documented without weakening the network namespace boundary.
 
 #### Scenario: Terminal attaches on an engine that mounts /dev read-only
 - **WHEN** an interactive session starts with a terminal on Podman 5 with crun 1.27
@@ -361,11 +361,12 @@ A reported cgroup v2 controller SHALL count as delegated only when the verified 
 - **THEN** the wrapper exits non-zero before image operations or container creation
 
 ### Requirement: Process budget falls back to the process rlimit
-When the verified engine does not delegate the `pids` controller and the engine host counts the process rlimit per container, the agent container SHALL be created with a soft and hard process rlimit equal to the selected process budget. When per-container counting is not established, the process budget SHALL stay unenforced. The memory and CPU budgets SHALL have no fallback.
+When the verified engine does not delegate the `pids` controller and the engine host counts the process rlimit per container, the agent container's first process SHALL set its soft and hard process rlimit to the selected process budget before the container's program runs. The engine SHALL apply no process rlimit for the budget: one applied at creation counts every container of the user. Otherwise the process budget SHALL stay unenforced. Memory and CPU SHALL have no fallback.
 
 #### Scenario: Process controller missing on a per-container host
 - **WHEN** a session starts with the default budgets on an engine delegating `cpu` and `memory` but not `pids`, on a host that counts the process rlimit per container
-- **THEN** the container is created with a soft and hard process rlimit of 512 and without a cgroup process limit
+- **THEN** the container's first process sets a soft and hard process rlimit of 512 before the application, or the guard in restricted modes, runs
+- **AND** the container is created without a cgroup process limit and without a process rlimit requested from the engine
 - **AND** the memory and CPU limits are applied as before
 
 #### Scenario: Process controller delegated
@@ -390,11 +391,19 @@ When the verified engine does not delegate the `pids` controller and the engine 
 - **WHEN** two sessions on the fallback run at the same time and the first holds processes up to its limit
 - **THEN** the second session can still create processes up to its own limit
 
+#### Scenario: Other containers do not consume the session's budget
+- **WHEN** other containers of the same user, such as proxies, engines or their nested containers, together hold more processes than the session's budget
+- **THEN** the session starts, and can create processes up to its own budget
+
+#### Scenario: The limit cannot be set
+- **WHEN** the container's first process cannot set the process rlimit to the selected budget
+- **THEN** the container stops before the application or the guard runs, and the launch exits non-zero
+
 ### Requirement: Process rlimit fallback is verified
-When the process budget uses the rlimit fallback, each launch SHALL require the created agent container to carry a soft and hard process rlimit equal to the selected budget. Setup smoke and restricted qualification SHALL measure the same effective limit inside the agent container. A mismatch SHALL stop startup or setup with an actionable diagnostic, without a retry using weaker limits.
+When the process budget uses the rlimit fallback, each launch SHALL require the created agent container to start with the step that sets the selected budget, and to carry no process rlimit requested by the wrapper. Setup smoke and restricted qualification SHALL measure the effective limit inside the agent container. A mismatch SHALL stop startup or setup with an actionable diagnostic, without a retry using weaker limits.
 
 #### Scenario: Engine drops the process rlimit
-- **WHEN** the created container reports no process rlimit, or a soft or hard value different from the selected budget
+- **WHEN** the created container does not start with the step that sets the selected budget, for example because the engine dropped or replaced its entry command, or the step sets another value, or the container carries a process rlimit requested by the wrapper
 - **THEN** the wrapper removes only its own container and exits non-zero before the application starts
 - **AND** the diagnostic names the process rlimit fallback
 
@@ -402,3 +411,10 @@ When the process budget uses the rlimit fallback, each launch SHALL require the 
 - **WHEN** setup smoke or the restricted qualification probe runs inside an agent container on the fallback
 - **THEN** it reads the effective soft and hard process rlimit and requires both to equal the selected budget
 - **AND** it requires the cgroup process interface to be absent or unlimited
+
+### Requirement: Sessions receive no Podman socket
+No OpenCode or shell session container SHALL receive a host Podman socket mount or private `/var/lib/containers` / `/run/containers` delegation mounts in any network mode. When no session container engine is started, both `CONTAINER_HOST` and `DOCKER_HOST` SHALL be absent from the session environment.
+
+#### Scenario: Unrestricted session without library images
+- **WHEN** an unrestricted session starts with no image toolchains in the library
+- **THEN** `/run/podman/podman.sock` is absent and neither `CONTAINER_HOST` nor `DOCKER_HOST` is set

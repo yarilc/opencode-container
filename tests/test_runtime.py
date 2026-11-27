@@ -1,6 +1,7 @@
 """Opt-in real rootless Podman checks using disposable state and no credentials."""
 import base64
 import errno
+import json
 import os
 from pathlib import Path
 import pty
@@ -14,6 +15,7 @@ import tempfile
 import termios
 import time
 import unittest
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'network'))
 import agent_budgets  # noqa: E402
@@ -21,8 +23,47 @@ import agent_budgets  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / 'opencode-container.sh'
 USER_NAME = subprocess.check_output(['id', '-un'], text=True).strip()
-IMAGE = 'localhost/opencode-cli:latest'
+IMAGE = os.environ.get('OPENCODE_CONTAINER_IMAGE', 'localhost/opencode-cli:latest')
+ENGINE_IMAGE = os.environ.get('OPENCODE_CONTAINER_ENGINE_IMAGE', 'localhost/opencode-cli-engine:latest')
+# A small local image the library copies into its store (pinned, already in the engine).
+SAMPLE = os.environ.get('SANDBOX_TEST_ENGINE_SAMPLE', 'docker.io/library/alpine@sha256:'
+                        'c64c687cbea9300178b30c95835354e34c4e4febc4badfe27102879de0483b5e')
+SYSTEMD_SAMPLE = os.environ.get('SANDBOX_TEST_SYSTEMD_SAMPLE', '')
+INELIGIBLE = 'systemd containers and explicit limits for nested containers are unavailable'
+LIMIT_PROBE = ('for f in memory.max memory.high pids.max cpu.max cgroup.max.descendants cgroup.max.depth; do '
+               '[ -e /sys/fs/cgroup/$f ] || continue; v=$(cat /sys/fs/cgroup/$f); '
+               'if { printf "%s\\n" "$v" > /sys/fs/cgroup/$f; } 2>/dev/null; then echo "limit=$f:writable"; '
+               'else echo "limit=$f:denied"; fi; done')
 ENABLED = os.environ.get('OPENCODE_RUNTIME_TESTS') == '1'
+
+
+def engine_budgets(env):
+    """Delegated controllers and process mechanism of the engine, by the launcher's rule."""
+    def info(template):
+        return subprocess.run(['podman', 'info', '--format', template], env=env, check=True,
+                              capture_output=True, text=True, timeout=60).stdout.strip()
+    delegated = agent_budgets.delegated(info('{{.Host.CgroupControllers}}'), info('{{.Host.CgroupManager}}'))
+    return delegated, agent_budgets.process_mechanism(delegated, info('{{.Host.Kernel}}'))
+
+
+def start_crowd(test, env, count):
+    """A container of the caller holding count sleeping processes, removed at cleanup."""
+    name = 'opencode-test-crowd-' + uuid.uuid4().hex[:12]
+    test.addCleanup(subprocess.run, ['podman', 'rm', '--force', '--time', '0', '--ignore', name],
+                    env=env, capture_output=True, timeout=60)
+    subprocess.run(['podman', 'run', '--detach', '--rm', '--name', name, '--userns=keep-id',
+                    '--user', f'{os.getuid()}:{os.getgid()}', '--network=none', '--entrypoint', '/bin/sh', IMAGE,
+                    '-c', f'i=0; while [ $i -lt {count} ]; do sleep 600 & i=$((i + 1)); done; wait'],
+                   env=env, check=True, capture_output=True, text=True, timeout=60)
+    deadline = time.monotonic() + 60
+    while True:
+        top = subprocess.run(['podman', 'top', name, 'pid'], env=env, capture_output=True, text=True, timeout=30)
+        # The header line, the shell and its sleeping children.
+        if len(top.stdout.splitlines()) >= count + 2 or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    test.assertGreaterEqual(len(top.stdout.splitlines()), count + 2, top.stdout + top.stderr)
+    return name
 
 
 def terminal_shell(command, script, env, cwd, timeout=90):
@@ -87,12 +128,10 @@ class RuntimeTests(unittest.TestCase):
         self.project = self.base / 'project with spaces,commas'
         self.project.mkdir()
         self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.home), 'LANG': 'C.UTF-8',
-                    'OPENCODE_CONTAINER_PODMAN': '0', 'OPENCODE_CONTAINER_NETWORK': 'unrestricted',
-                    'OPENCODE_CONTAINER_MAINTENANCE': '1'}
+                    'OPENCODE_CONTAINER_NETWORK': 'unrestricted',
+                    'OPENCODE_CONTAINER_MAINTENANCE': '1',
+                    'OPENCODE_CONTAINER_IMAGE': IMAGE}
         if os.environ.get('CONTAINER_HOST'): self.env['CONTAINER_HOST'] = os.environ['CONTAINER_HOST']
-        self.socket = os.environ.get('OPENCODE_CONTAINER_PODMAN_SOCKET', '')
-        if not self.socket:
-            self.socket = self.env.get('CONTAINER_HOST', 'unix:///run/user/%s/podman/podman.sock' % os.getuid()).removeprefix('unix://')
 
     def shell(self, script, *options, **env):
         return subprocess.run([str(WRAPPER), '--container-shell', *options],
@@ -262,19 +301,6 @@ print('pty-and-masks-ok')
         self.assertEqual((self.project / 'worktree-file').stat().st_uid, os.getuid())
         self.assertNotEqual(self.shell('git status --porcelain').returncode, 0)
 
-    def test_child_container_host_bind(self):
-        script = '''test -S /run/podman/podman.sock
-        test "$CONTAINER_HOST" = unix:///run/podman/podman.sock
-        podman run --rm --read-only --userns=keep-id --user "$(id -u):$(id -g)" \\
-            --volume "$PWD:$PWD:rw" --workdir "$PWD" --entrypoint /bin/sh \\
-            ''' + shlex.quote(IMAGE) + ''' -ec 'printf child > child-file'
-        test "$(cat child-file)" = child
-        '''
-        self.assert_success(self.shell(script, OPENCODE_CONTAINER_PODMAN='1',
-                                       OPENCODE_CONTAINER_PODMAN_SOCKET=self.socket))
-        self.assertEqual((self.project / 'child-file').read_text(), 'child')
-        self.assertEqual((self.project / 'child-file').stat().st_uid, os.getuid())
-
     def test_mounts_state_identity_and_entrypoint(self):
         for name in ('.claude','.agents'):
             path=self.home/name; path.mkdir(); (path/'sentinel').write_text('readonly')
@@ -345,11 +371,7 @@ grep '^Max processes' /proc/self/limits
 
     def engine_budgets(self):
         """Delegated controllers and process mechanism of the engine, by the launcher's rule."""
-        def info(template):
-            return subprocess.run(['podman', 'info', '--format', template], env=self.env, check=True,
-                                  capture_output=True, text=True, timeout=60).stdout.strip()
-        delegated = agent_budgets.delegated(info('{{.Host.CgroupControllers}}'), info('{{.Host.CgroupManager}}'))
-        return delegated, agent_budgets.process_mechanism(delegated, info('{{.Host.Kernel}}'))
+        return engine_budgets(self.env)
 
     def test_effective_hardening_and_budgets(self):
         # Budgets apply as the engine allows: cgroup limits only for delegated
@@ -358,32 +380,29 @@ grep '^Max processes' /proc/self/limits
         for env,(memory,pids,cpu) in (({},('4294967296','512','200000 100000')),
                                       ({'OPENCODE_CONTAINER_MEMORY_LIMIT':'1g','OPENCODE_CONTAINER_CPU_LIMIT':'1.5',
                                         'OPENCODE_CONTAINER_PIDS_LIMIT':'256'},('1073741824','256','150000 100000'))):
-            for delegated in ('0','1'):
-                with self.subTest(env=env,delegated=delegated):
-                    extra={'OPENCODE_CONTAINER_PODMAN':delegated}
-                    if delegated=='1': extra['OPENCODE_CONTAINER_PODMAN_SOCKET']=self.socket
-                    result=self.cgroup(**env,**extra)
-                    out=result.stdout
-                    for field in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):
-                        self.assertRegex(out,field+r':\s*0000000000000000')
-                    self.assertRegex(out,r'NoNewPrivs:\s*1')
-                    self.assertIn('memory.max='+(memory if 'memory' in controllers else 'max')+'\n',out)
-                    self.assertIn('pids.max='+(pids if mechanism=='cgroup' else 'max')+'\n',out)
-                    if 'cpu' in controllers:
-                        self.assertIn('cpu.max='+cpu,out)
+            with self.subTest(env=env):
+                result=self.cgroup(**env)
+                out=result.stdout
+                for field in ('CapInh','CapPrm','CapEff','CapBnd','CapAmb'):
+                    self.assertRegex(out,field+r':\s*0000000000000000')
+                self.assertRegex(out,r'NoNewPrivs:\s*1')
+                self.assertIn('memory.max='+(memory if 'memory' in controllers else 'max')+'\n',out)
+                self.assertIn('pids.max='+(pids if mechanism=='cgroup' else 'max')+'\n',out)
+                if 'cpu' in controllers:
+                    self.assertIn('cpu.max='+cpu,out)
+                else:
+                    self.assertRegex(out,r'cpu\.max=max\b')
+                if mechanism=='rlimit':
+                    self.assertRegex(out,r'Max processes\s+'+pids+r'\s+'+pids+r'\s')
+                for budget,controller in (('memory','memory'),('CPU','cpu')):
+                    notice=f'agent {budget} budget not enforced'
+                    if controller in controllers:
+                        self.assertNotIn(notice,result.stderr)
                     else:
-                        self.assertRegex(out,r'cpu\.max=max\b')
-                    if mechanism=='rlimit':
-                        self.assertRegex(out,r'Max processes\s+'+pids+r'\s+'+pids+r'\s')
-                    for budget,controller in (('memory','memory'),('CPU','cpu')):
-                        notice=f'agent {budget} budget not enforced'
-                        if controller in controllers:
-                            self.assertNotIn(notice,result.stderr)
-                        else:
-                            self.assertIn(notice,result.stderr)
-                    rlimit=f'agent process budget enforced through the process rlimit ({pids} tasks'
-                    self.assertEqual(rlimit in result.stderr,mechanism=='rlimit',result.stderr)
-                    self.assertEqual('agent process budget not enforced' in result.stderr,mechanism=='none',result.stderr)
+                        self.assertIn(notice,result.stderr)
+                rlimit=f'agent process budget enforced through the process rlimit ({pids} tasks'
+                self.assertEqual(rlimit in result.stderr,mechanism=='rlimit',result.stderr)
+                self.assertEqual('agent process budget not enforced' in result.stderr,mechanism=='none',result.stderr)
 
     def test_process_limit_enforced(self):
         # A process budget is enforced, not just reported. Under the rlimit
@@ -398,15 +417,33 @@ grep '^Max processes' /proc/self/limits
         self.assert_success(result)
         self.assertIn('PIDS_BUDGET_ENFORCED',result.stdout)
 
+    def test_process_rlimit_counts_per_container(self):
+        # set-process-limits-inside-containers: on the rlimit fallback, other
+        # containers of the user do not consume the session's budget.
+        _, mechanism = self.engine_budgets()
+        if mechanism != 'rlimit':
+            self.skipTest('the engine does not use the process rlimit fallback')
+        start_crowd(self, self.env, 150)
+        result = self.shell('python3 - <<\'CHECK\'\nimport subprocess\nchildren = []\n'
+                            'def spawn(total):\n    try:\n        while len(children) < total:\n'
+                            '            children.append(subprocess.Popen(["sleep", "60"]))\n'
+                            '    except (BlockingIOError, OSError):\n        pass\n    return len(children)\n'
+                            'first, second = spawn(100), spawn(200)\n[child.kill() for child in children]\n'
+                            'print("PROCESSES", first, second)\nCHECK\n', OPENCODE_CONTAINER_PIDS_LIMIT='128')
+        self.assert_success(result)
+        counts = next(line.split()[1:] for line in result.stdout.splitlines() if line.startswith('PROCESSES'))
+        first, second = map(int, counts)
+        self.assertEqual(first, 100, result.stdout)
+        # The session's own processes count as well: the shell, Python and the init process.
+        self.assertTrue(115 <= second < 128, result.stdout)
+
     def test_tools_without_capabilities(self):
         result=self.shell('''git init -q repo && git -C repo -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m x
 openspec --version >/dev/null
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all true && echo BWRAP_OK
-podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && echo DELEGATED_CHILD_OK
-''',OPENCODE_CONTAINER_PODMAN='1',OPENCODE_CONTAINER_PODMAN_SOCKET=self.socket)
+''')
         self.assert_success(result)
-        for marker in ('BWRAP_OK','DELEGATED_CHILD_OK'):
-            self.assertIn(marker,result.stdout)
+        self.assertIn('BWRAP_OK',result.stdout)
 
     def test_lifetime_limit(self):
         before=time.monotonic()
@@ -452,10 +489,16 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
         version='acceptance-'+self.base.name
         tag=f'localhost/opencode-sandbox:{version}-{USER_NAME}-{os.getuid()}-{os.getgid()}'
         context=self.base/'env-context';context.mkdir()
-        (context/'Containerfile').write_text('FROM '+IMAGE+'\nENV CONTAINER_HOST=unix:///image-default.sock\n')
+        (context/'Containerfile').write_text(
+            'FROM '+IMAGE+'\nENV CONTAINER_HOST=unix:///image-default.sock\nENV DOCKER_HOST=unix:///docker-default.sock\n')
         try:
             self.assert_success(self.engine('build','--tag',tag,str(context),timeout=90))
-            self.assert_success(self.shell('test -z "${CONTAINER_HOST+x}"',OPENCODE_CONTAINER_IMAGE=tag))
+            self.assert_success(self.shell(
+                'test -z "${CONTAINER_HOST+x}"\ntest -z "${DOCKER_HOST+x}"\ntest ! -S /run/podman/podman.sock\n',
+                OPENCODE_CONTAINER_IMAGE=tag))
+            refused = self.shell('true', OPENCODE_CONTAINER_IMAGE=tag, OPENCODE_CONTAINER_PODMAN='1')
+            self.assertEqual(refused.returncode, 1)
+            self.assertIn('OPENCODE_CONTAINER_PODMAN=1: host Podman delegation was removed', refused.stderr)
         finally:
             self.engine('rmi','--force',tag)
 
@@ -465,18 +508,25 @@ podman run --rm --pull=never --entrypoint true '''+shlex.quote(IMAGE)+''' && ech
         host_socket=query.stdout.strip()
         visible='/run/opencode-test/socket.sock'
         # The caller needs host tooling; select the same runner image explicitly.
-        runner=os.environ.get('OPENCODE_TEST_TOOLS_IMAGE','localhost/claude-code:latest')
-        command=['podman','run','--rm','--label','io.opencode-container.acceptance='+self.base.name,'--interactive','--read-only','--userns=keep-id',
-                 '--user',f'{os.getuid()}:{os.getgid()}', '--volume',f'{ROOT}:{ROOT}:ro',
-                 '--volume',f'{self.base}:{self.base}:rw','--volume',f'{self.home}:{self.home}:rw',
-                 '--volume',f'{host_socket}:{visible}:rw','--env','CONTAINER_HOST=unix://'+visible,
-                 '--env','HOME='+str(self.home),'--env','OPENCODE_CONTAINER_PODMAN=1',
-                 '--env','OPENCODE_CONTAINER_NETWORK=unrestricted',
-                 '--workdir',str(self.project),'--entrypoint','/bin/bash',runner,str(WRAPPER),'--container-shell']
-        result=subprocess.run(command,input='set -e\ntest -S /run/podman/podman.sock\npodman info >/dev/null\nprintf nested > nested-file\n',
+        runner=os.environ.get('OPENCODE_TEST_TOOLS_IMAGE',IMAGE)
+        base_cmd=['podman','run','--rm','--label','io.opencode-container.acceptance='+self.base.name,'--interactive','--read-only','--userns=keep-id',
+                  '--user',f'{os.getuid()}:{os.getgid()}', '--volume',f'{ROOT}:{ROOT}:ro',
+                  '--volume',f'{self.base}:{self.base}:rw','--volume',f'{self.home}:{self.home}:rw',
+                  '--volume',f'{host_socket}:{visible}:rw','--env','CONTAINER_HOST=unix://'+visible,
+                  '--env','HOME='+str(self.home),
+                  '--env','OPENCODE_CONTAINER_NETWORK=unrestricted',
+                  '--env','OPENCODE_CONTAINER_IMAGE='+IMAGE,
+                  '--workdir',str(self.project),'--entrypoint','/bin/bash']
+        result=subprocess.run([*base_cmd,runner,str(WRAPPER),'--container-shell'],
+                              input='set -e\ntest ! -S /run/podman/podman.sock\ntest -z "${CONTAINER_HOST+x}"\ntest -z "${DOCKER_HOST+x}"\nprintf nested > nested-file\n',
                               capture_output=True,text=True,timeout=90)
         self.assert_success(result)
         self.assertEqual((self.project/'nested-file').read_text(),'nested')
+        self.assertEqual((self.project/'nested-file').stat().st_uid,os.getuid())
+        refused=subprocess.run([*base_cmd,'--env','OPENCODE_CONTAINER_PODMAN=1',runner,str(WRAPPER),'--container-shell'],
+                               input='exit 0\n',capture_output=True,text=True,timeout=90)
+        self.assertEqual(refused.returncode,1)
+        self.assertIn('OPENCODE_CONTAINER_PODMAN=1: host Podman delegation was removed',refused.stderr)
 
     def test_version(self):
         result=subprocess.run([str(WRAPPER),'--version'],env=self.env,cwd=self.project,
@@ -671,6 +721,278 @@ echo toolchains-ok''')
         result = self.shell('test ! -e /toolchains\necho omitted', OPENCODE_CONTAINER_TOOLCHAINS='0')
         self.assert_success(result)
         self.assertIn('omitted', result.stdout)
+
+
+@unittest.skipUnless(ENABLED, 'set OPENCODE_RUNTIME_TESTS=1 for real rootless Podman checks')
+class SessionEngineTests(unittest.TestCase):
+    """The session container engine on a real rootless engine (session-container-engine)."""
+
+    @classmethod
+    def setUpClass(cls):
+        for image in (ENGINE_IMAGE, SAMPLE):
+            if subprocess.run(['podman', 'image', 'exists', image], capture_output=True).returncode:
+                raise unittest.SkipTest('prepare ' + image + ' in the engine first')
+        cls.sample_id = subprocess.run(['podman', 'image', 'inspect', '--format', '{{.Id}}', SAMPLE],
+                                       capture_output=True, text=True, check=True).stdout.strip()
+
+    def setUp(self):
+        workspace_root = Path(os.environ.get('OPENCODE_TEST_STATE_ROOT', str(ROOT / '.test-state')))
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        self.base = Path(tempfile.mkdtemp(prefix='engine-', dir=workspace_root)).resolve()
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.project = self.base / self.base.name
+        self.project.mkdir()
+        self.native = Path(tempfile.mkdtemp(prefix='sandbox-engine-', dir=os.environ.get('SANDBOX_TEST_STATE_ROOT')))
+        self.addCleanup(shutil.rmtree, self.native, True)
+        self.host_home = self.native / 'home'
+        self.host_home.mkdir(mode=0o700)
+        self.env = {'PATH': os.environ['PATH'], 'HOME': str(self.host_home), 'TMPDIR': str(self.native),
+                    'OPENCODE_CONTAINER_NETWORK': 'unrestricted', 'OPENCODE_CONTAINER_MAINTENANCE': '1',
+                    'OPENCODE_CONTAINER_IMAGE': IMAGE, 'OPENCODE_CONTAINER_ENGINE_IMAGE': ENGINE_IMAGE,
+                    'OPENCODE_CONTAINER_STATE_DIR': str(self.native / 'state')}
+        if os.environ.get('CONTAINER_HOST'):
+            self.env['CONTAINER_HOST'] = os.environ['CONTAINER_HOST']
+        self.add_image('sample', 'localhost/sandbox-test-sample:1')
+
+    def toolchain(self, *args):
+        # Operator recipes stay outside the directory the command runs from.
+        result = subprocess.run([sys.executable, '-I', str(ROOT / 'setup/toolchains.py'), *args], env=self.env,
+                                cwd=self.project, capture_output=True, text=True, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def add_image(self, name, reference, image_id=None):
+        recipe = self.native / (name + '.json')
+        image_id = image_id or self.sample_id
+        recipe.write_text(json.dumps({
+            'schema': 2, 'name': name, 'version': '1', 'default': False,
+            'images': [{'local': 'sha256:' + image_id.removeprefix('sha256:'), 'name': reference}],
+            'check': ['podman', 'run', '--rm', '--network=none', reference, 'true']}))
+        self.toolchain('add', str(recipe))
+        self.addCleanup(subprocess.run, [sys.executable, '-I', str(ROOT / 'setup/toolchains.py'), 'remove', name],
+                        env=self.env, cwd=self.project, capture_output=True, timeout=300)
+
+    def shell(self, script, timeout=180):
+        return subprocess.run([str(WRAPPER), '--container-shell'], cwd=self.project, env=self.env,
+                              input='set -Eeuo pipefail\n' + script, text=True, capture_output=True, timeout=timeout)
+
+    def assert_success(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def engines(self):
+        listing = subprocess.run(['podman', 'ps', '--all', '--filter', 'label=sandbox-engine.owner',
+                                  '--format', '{{.Names}}'], capture_output=True, text=True, check=True).stdout
+        return [name for name in listing.split() if name.startswith(self.project.name + '-engine-')]
+
+    def test_session_engine_runs_library_images_inside_the_session_boundaries(self):
+        # session-container-engine: Loopback endpoint / Library images run offline from a read-only store /
+        # Nested containers have private process and host-name views / Engine mounts only the workspace /
+        # Engine carries no secrets / Session-owned engine storage.
+        result = self.shell(r"""
+test "$CONTAINER_HOST" = tcp://127.0.0.1:2375
+test "$DOCKER_HOST" = tcp://127.0.0.1:2375
+test ! -S /run/podman/podman.sock
+test "$(podman info --format '{{.Host.Security.Rootless}}')" = true
+view=$(podman run --rm --network=none localhost/sandbox-test-sample:1 sh -c \
+  'echo "$(cat /proc/1/comm) $(ls /proc | grep -c "^[0-9]") $(cat /proc/sys/kernel/hostname) $(ls -A /run/secrets 2>/dev/null | wc -l)"')
+set -- $view
+test "$1" = sh && test "$2" -le 4 && test "$3" != "$(cat /proc/sys/kernel/hostname)" && test "$4" = 0
+echo "NESTED_VIEW $view"
+podman run --rm --network=none -v "$PWD:$PWD" -w "$PWD" localhost/sandbox-test-sample:1 sh -c 'echo nested > nested-file'
+test "$(stat -c %u nested-file)" = "$(id -u)"
+podman run --rm --network=none -v /etc:/outside:ro localhost/sandbox-test-sample:1 grep -q k8s-file /outside/containers/containers.conf
+! podman rmi localhost/sandbox-test-sample:1
+podman image exists localhost/sandbox-test-sample:1
+# Builds and the extraction of new layers (pull, load) chroot.
+mkdir .build-context && printf 'FROM localhost/sandbox-test-sample:1\nRUN echo built > /built\n' > .build-context/Containerfile
+podman build --quiet --pull=never --tag localhost/sandbox-test-built:1 .build-context >/dev/null
+test "$(podman run --rm --network=none localhost/sandbox-test-built:1 cat /built)" = built
+podman save --quiet --output .built.tar localhost/sandbox-test-built:1
+podman rmi localhost/sandbox-test-built:1 >/dev/null
+podman load --quiet --input .built.tar >/dev/null
+podman image exists localhost/sandbox-test-built:1
+rm -rf .build-context .built.tar
+echo ENGINE_SESSION_OK
+""")
+        self.assert_success(result)
+        self.assertIn('ENGINE_SESSION_OK', result.stdout)
+        self.assertEqual((self.project / 'nested-file').stat().st_uid, os.getuid())
+        self.assertEqual(self.engines(), [])
+
+    def test_engine_process_rlimit_counts_per_container(self):
+        # set-process-limits-inside-containers: on the rlimit fallback, an engine
+        # session starts and runs a nested container beside a container holding more
+        # processes than its budget.
+        if engine_budgets(self.env)[1] != 'rlimit':
+            self.skipTest('the engine does not use the process rlimit fallback')
+        start_crowd(self, self.env, 520)
+        result = self.shell('test "$(grep "^Max processes" /proc/self/limits | tr -s " " | cut -d" " -f3,4)" = "512 512"\n'
+                            'podman run --rm --network=none localhost/sandbox-test-sample:1 true\n'
+                            'echo NESTED_BESIDE_CROWD_OK\n')
+        self.assert_success(result)
+        self.assertIn('NESTED_BESIDE_CROWD_OK', result.stdout)
+        self.assertEqual(self.engines(), [])
+
+    def test_no_engine_without_library_images(self):
+        # session-container-engine: Library without images.
+        self.toolchain('remove', 'sample')
+        result = self.shell('test -z "${CONTAINER_HOST+x}${DOCKER_HOST+x}"\necho NO_ENGINE_OK\n')
+        self.assert_success(result)
+        self.assertNotIn('container engine', result.stderr)
+
+    def eligibility(self):
+        """The engine's delegation as a session launch reports it: None when delegated, else the reason."""
+        result = self.shell('echo ELIGIBILITY_PROBE\n')
+        self.assert_success(result)
+        notice = next((line for line in result.stderr.splitlines() if INELIGIBLE in line), None)
+        return None if notice is None else notice.split(INELIGIBLE + ': ', 1)[-1]
+
+    def test_systemd_runs_in_nested_containers(self):
+        # support-nested-systemd-containers: Systemd in nested containers / Unit and journal.
+        if not SYSTEMD_SAMPLE:
+            self.skipTest('set SANDBOX_TEST_SYSTEMD_SAMPLE to a systemd image in the engine')
+        if subprocess.run(['podman', 'image', 'exists', SYSTEMD_SAMPLE], capture_output=True).returncode:
+            self.skipTest('prepare ' + SYSTEMD_SAMPLE + ' in the engine first')
+        reason = self.eligibility()
+        if reason is not None:
+            self.skipTest('the engine is ineligible: ' + reason)
+        image_id = subprocess.run(['podman', 'image', 'inspect', '--format', '{{.Id}}', SYSTEMD_SAMPLE],
+                                  capture_output=True, text=True, check=True).stdout.strip()
+        self.add_image('systemd', 'localhost/sandbox-test-systemd:1', image_id)
+        result = self.shell(r"""
+podman run --detach --name target --systemd=always localhost/sandbox-test-systemd:1 >/dev/null
+if ! podman exec target timeout 120 sh -c 'until systemctl is-system-running | grep -qE "^(running|degraded)$"; do sleep 1; done'; then
+  echo "SYSTEM_STATE $(podman exec target systemctl is-system-running || true)"
+  podman exec target systemctl --failed --no-pager || true
+  exit 1
+fi
+echo "SYSTEM_STATE $(podman exec target systemctl is-system-running || true)"
+podman exec target systemd-run --unit=probe --property=Type=oneshot /bin/true
+podman exec target systemd-run --unit=journaled --property=Type=oneshot --property=RemainAfterExit=yes \
+  /bin/sh -c 'echo journaled-output'
+test "$(podman exec target systemctl is-active journaled)" = active
+podman exec target journalctl -u journaled --no-pager -o cat | grep -q journaled-output
+podman rm --force --time 0 target >/dev/null
+echo SYSTEMD_OK
+""", timeout=300)
+        self.assert_success(result)
+        self.assertIn('SYSTEMD_OK', result.stdout)
+        self.assertNotIn(INELIGIBLE, result.stderr)
+        self.assertEqual(self.engines(), [])
+
+    def test_engine_cgroup_delegation_in_sessions(self):
+        # support-nested-systemd-containers: Delegated engine cgroup subtree / Explicit limits for
+        # nested containers / Engine startup step / Ineligible engines are announced.
+        reason = self.eligibility()
+        if reason is not None:
+            result = self.shell('! podman run --rm --network=none --memory=64m localhost/sandbox-test-sample:1 true\n'
+                                'echo INELIGIBLE_SESSION_OK\n')
+            self.assert_success(result)
+            self.assertIn('INELIGIBLE_SESSION_OK', result.stdout)
+            self.skipTest('the engine is ineligible: ' + reason)
+        controllers = engine_budgets(self.env)[0]
+        limited = 'memory' in controllers and 'pids' in controllers
+        marker = self.project / '.inspected'
+        session = subprocess.Popen([str(WRAPPER), '--container-shell'], cwd=self.project, env=self.env,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop_session():
+            if session.poll() is None:
+                session.terminate()
+                try:
+                    session.wait(timeout=25)
+                except subprocess.TimeoutExpired:
+                    session.kill()
+            session.communicate()
+        self.addCleanup(stop_session)
+        session.stdin.write(r"""set -Eeuo pipefail
+own=$(podman run --rm --network=none --cgroupns=host localhost/sandbox-test-sample:1 cat /proc/self/cgroup)
+case $own in 0::/engine|0::/) echo "NESTED_AT $own"; exit 1 ;; 0::/?*) echo "NESTED_OWN_CGROUP $own" ;; *) exit 1 ;; esac
+podman run --rm --network=none --cgroupns=host --security-opt=unmask=ALL localhost/sandbox-test-sample:1 \
+  sh -c '""" + LIMIT_PROBE.replace("'", "'\\''") + r"""' | sed 's/^/NESTED_/'
+if limits=$(podman run --rm --network=none --memory=64m --pids-limit=32 localhost/sandbox-test-sample:1 \
+    sh -c 'echo "$(cat /sys/fs/cgroup/memory.max) $(cat /sys/fs/cgroup/pids.max)"' 2>&1); then
+  echo "NESTED_LIMITS $limits"
+else
+  echo "NESTED_LIMITS refused"
+fi
+echo SESSION_READY
+while [ ! -e .inspected ]; do sleep 0.2; done
+echo DELEGATION_SESSION_OK
+""")
+        session.stdin.close()
+        session.stdin = None
+        ready = []
+        for line in session.stdout:
+            ready.append(line.strip())
+            if line.strip() == 'SESSION_READY':
+                break
+        self.assertIn('SESSION_READY', ready, '\n'.join(ready) + (session.stderr.read() if session.poll() else ''))
+        engine = self.engines()
+        self.assertEqual(len(engine), 1, engine)
+        listing = subprocess.run(['podman', 'exec', '--user', 'podman', engine[0], 'sh', '-c',
+                                  'init=$(readlink /proc/1/ns/user); for p in /proc/[0-9]*; do '
+                                  '[ "$(readlink "$p/ns/user" 2>/dev/null)" = "$init" ] || continue; '
+                                  'grep -E "^(Uid|CapPrm|CapEff|CapAmb):" "$p/status" 2>/dev/null '
+                                  '| tr -s "\t" " " | tr "\n" " "; echo; done'],
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        processes = [line.split() for line in listing.stdout.splitlines() if line.strip()]
+        self.assertTrue(processes)
+        for fields in processes:
+            with self.subTest(process=' '.join(fields)):
+                self.assertNotEqual(fields[fields.index('Uid:') + 1], '0')
+                for name in ('CapPrm:', 'CapEff:', 'CapAmb:'):
+                    self.assertFalse(int(fields[fields.index(name) + 1], 16) & 1, 'CAP_CHOWN in ' + name)
+        marker.touch()
+        stdout, stderr = session.communicate(timeout=180)
+        self.assertEqual(session.returncode, 0, stdout + stderr)
+        output = '\n'.join(ready) + '\n' + stdout
+        self.assertIn('DELEGATION_SESSION_OK', output)
+        self.assertNotIn(INELIGIBLE, stderr)
+        self.assertIn('NESTED_OWN_CGROUP 0::/', output)
+        nested = [line[len('NESTED_limit='):] for line in output.splitlines() if line.startswith('NESTED_limit=')]
+        self.assertGreaterEqual(len(nested), 2, output)
+        self.assertTrue(all(result.endswith(':denied') for result in nested), nested)
+        self.assertIn('NESTED_LIMITS 67108864 32' if limited else 'NESTED_LIMITS refused', output)
+        self.assertEqual(self.engines(), [])
+
+    def test_live_image_and_isolated_concurrent_sessions(self):
+        # session-container-engine: Image added during a session / Two sessions.
+        marker = self.project / '.image-added'
+        first = subprocess.Popen([str(WRAPPER), '--container-shell'], cwd=self.project, env=self.env,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def stop_first():
+            if first.poll() is None:
+                first.terminate()
+                try:
+                    first.wait(timeout=25)
+                except subprocess.TimeoutExpired:
+                    first.kill()
+            first.communicate()
+        self.addCleanup(stop_first)
+        first.stdin.write(r"""set -Eeuo pipefail
+podman run -d --name first-session-marker --network=none localhost/sandbox-test-sample:1 sleep 120 >/dev/null
+echo FIRST_READY
+while [ ! -e .image-added ]; do sleep 0.2; done
+podman run --rm --network=none localhost/sandbox-test-live:1 true
+echo LIVE_IMAGE_OK
+podman rm -f -t 0 first-session-marker >/dev/null
+""")
+        first.stdin.close()
+        first.stdin = None
+        ready, _, _ = select.select([first.stdout], [], [], 60)
+        self.assertTrue(ready, 'first session did not report readiness')
+        self.assertEqual(first.stdout.readline().strip(), 'FIRST_READY',
+                         first.stderr.read() if first.poll() is not None else '')
+        second = self.shell('! podman container exists first-session-marker\n'
+                            'test -z "$(podman ps --all --quiet)"\necho SECOND_ISOLATED\n')
+        self.assert_success(second)
+        self.add_image('live', 'localhost/sandbox-test-live:1')
+        marker.touch()
+        stdout, stderr = first.communicate(timeout=180)
+        self.assertEqual(first.returncode, 0, stdout + stderr)
+        self.assertIn('LIVE_IMAGE_OK', stdout)
+        self.assertEqual(self.engines(), [])
 
 
 if __name__ == '__main__':

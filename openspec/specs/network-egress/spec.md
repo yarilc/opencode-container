@@ -34,7 +34,7 @@ The wrapper SHALL accept `OPENCODE_CONTAINER_NETWORK=offline|provider|unrestrict
 
 #### Scenario: Unrestricted keeps current behavior
 - **WHEN** an operator selects `unrestricted`
-- **THEN** the session has direct networking and optional delegation with the common launcher hardening, and needs no host Python, guard or qualification report
+- **THEN** the session has direct networking with the common launcher hardening, refuses exact `OPENCODE_CONTAINER_PODMAN=1`, starts a private session engine only when the library holds images, and needs no host Python, guard or qualification report
 
 #### Scenario: Qualification is not an ordinary session
 - **WHEN** `--container-qualify` runs with no effective mode
@@ -543,7 +543,7 @@ Documentation SHALL map N01–N15 and C01–C13 to implementation and acceptance
 #### Scenario: Provider profile readiness
 - **WHEN** a profile is declared verified for an OpenCode version
 - **THEN** operator-run evidence covers authenticated model requests, streaming, long-lived requests, supported WebSockets, OpenTUI, CA behavior, shell and YOLO modes
-- **AND** credential-free tests separately cover DNS/UDP/IPv6, direct IPs and ports, deceptive hosts, redirects, host/LAN/metadata, administration, concurrency, delegation rejection, failure closure and cleanup
+- **AND** credential-free tests separately cover DNS/UDP/IPv6, direct IPs and ports, deceptive hosts, redirects, host/LAN/metadata, administration, concurrency, leftover delegation refusal, session engine containment, failure closure and cleanup
 
 #### Scenario: Authenticated check unavailable
 - **WHEN** a real API key or account check has not been run by the operator
@@ -555,7 +555,7 @@ Documentation SHALL map N01–N15 and C01–C13 to implementation and acceptance
 
 #### Scenario: Parity table
 - **WHEN** a reader compares the five wrappers
-- **THEN** `docs/network-contract.md` here, in `sandbox-container` and in `codex-container` show the same OpenCode row, with authenticated compatibility recorded as pending until the operator checks run
+- **THEN** `docs/network-contract.md` here and in `sandbox-container` show the same OpenCode row after parity synchronization, with authenticated compatibility recorded as pending until the operator checks run
 
 ### Requirement: Private runtime hierarchies admit only verified read-only masks
 Before agent code runs, the restricted bootstrap SHALL reject every nested mount below `/tmp`, `/run` and `/var/tmp`, except the engine metadata file `/run/.containerenv`, the provider runtime `/run/sandbox-egress` and `/run/secrets` when it is a `tmpfs` whose per-mount options are read-only. Provider proxies and qualification gate containers SHALL also receive the read-only `/run/secrets` mask.
@@ -618,11 +618,11 @@ The shared launcher core and the agent launcher part SHALL be part of the protec
 - **THEN** ordinary restricted startup requires requalification
 
 ### Requirement: Proxy process budget falls back to the process rlimit
-When the verified engine does not delegate the `pids` controller and the engine host counts the process rlimit per container, each session proxy SHALL be created with a soft and hard process rlimit of 128. The configured and effective limit SHALL be verified before agent execution. Otherwise the proxy process budget SHALL stay unenforced with a notice. The proxy memory budget SHALL have no fallback.
+When the verified engine does not delegate the `pids` controller and the engine host counts the process rlimit per container, each session proxy's first process SHALL set its soft and hard process rlimit to 128 before the proxy program runs, and the engine SHALL apply no process rlimit for the budget. The created proxy and its effective limit SHALL be verified before agent execution. Otherwise the proxy process budget SHALL stay unenforced with a notice. The proxy memory budget SHALL have no fallback.
 
 #### Scenario: Proxy on the process rlimit fallback
 - **WHEN** a restricted session prepares its proxy on an engine that delegates `memory` but not `pids`, on a host that counts the process rlimit per container
-- **THEN** the proxy is created with a soft and hard process rlimit of 128 and without a cgroup process limit
+- **THEN** the proxy's first process sets a soft and hard process rlimit of 128, and the proxy is created without a cgroup process limit and without a process rlimit requested from the engine
 - **AND** the effective process rlimit inside the proxy is verified before the agent starts
 - **AND** the session prints a notice that the proxy process budget is enforced through the process rlimit
 
@@ -635,6 +635,10 @@ When the verified engine does not delegate the `pids` controller and the engine 
 - **WHEN** the engine does not delegate `pids` and per-container counting is not established
 - **THEN** the session requests neither a cgroup process limit nor a process rlimit for the proxy
 - **AND** the session prints a notice naming the unenforced proxy process budget and why the fallback was not applied
+
+#### Scenario: Other containers do not consume the proxy's budget
+- **WHEN** other containers of the same user, such as other sessions, their proxies and engines, together hold more than 128 processes
+- **THEN** the proxy starts, passes its effective-limit check, and serves the session
 
 ### Requirement: Restricted sessions run the application under a confined init
 After confinement, the guard SHALL run the application as its child in a new process group that becomes the controlling terminal's foreground group, forward the termination and user signals it receives to the application, reap orphaned processes, and exit with the application's status, or 128 plus the signal number when a signal ended it. The waiting guard SHALL keep no proxy channel and no standard input or output.

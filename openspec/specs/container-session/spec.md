@@ -101,7 +101,7 @@ Session containers SHALL carry the ownership label `io.opencode-container.sessio
 - **THEN** the wrapper exits with status 1 and names the variable before any engine query or state creation
 
 ### Requirement: Explicit network mode admission
-Ordinary OpenCode and shell launches SHALL use the effective `OPENCODE_CONTAINER_NETWORK`, explicit or from the managed launcher. An unset or empty mode SHALL select `provider`. A provider launch without its protected installation or provider settings SHALL exit with status 1 and a `setup required:` message. The message SHALL name `--container-setup` and the explicit-mode alternative. The refusal SHALL come before engine queries, state creation or image operations. It SHALL NOT prompt, run setup or start an application. Help, setup and `--container-qualify` keep their own checks.
+Direct invocations of `opencode-container.sh` without a network mode SHALL apply OpenCode's provider default only when provider settings are present; otherwise they SHALL exit with status 1 and setup guidance before any engine call, state creation, or image operation. Options and environment variables other than `--container-help`, `--container-setup`, and `--container-toolchain` SHALL NOT bypass this gate.
 
 #### Scenario: Existing invocation without a mode
 - **WHEN** a user runs `opencode-container.sh` with no `OPENCODE_CONTAINER_NETWORK` and no provider settings, interactively or with redirected input
@@ -117,7 +117,7 @@ Ordinary OpenCode and shell launches SHALL use the effective `OPENCODE_CONTAINER
 - **THEN** help succeeds without engine calls or state side effects
 
 #### Scenario: Options and other settings do not imply setup
-- **WHEN** an unconfigured launch uses shell, build, worktree or YOLO, `OPENCODE_CONTAINER_MAINTENANCE=1`, or state, image, endpoint, policy or delegation settings
+- **WHEN** an unconfigured launch uses shell, build, worktree or YOLO, `OPENCODE_CONTAINER_MAINTENANCE=1`, or state, image, endpoint or policy settings
 - **THEN** it receives the same setup-required refusal
 - **AND** files in the current directory never admit the launch
 
@@ -226,7 +226,7 @@ Each create attempt SHALL set `CONTAINER_NAME` to the reserved container name an
 - **THEN** the wrapper returns the create status without retrying and removes that container
 
 ### Requirement: Read-only engine queries are bounded
-Every read-only engine query (`info`, `version`, `ps`, image and container existence and inspection, the delegation socket query) SHALL be bounded by a timeout. A response with a carriage return or extra records SHALL be refused. `create`, `start`, `build` and `pull` SHALL NOT be bounded.
+Every read-only engine query (`info`, `version`, `ps`, image and container existence and inspection) SHALL be bounded by a timeout. A response with a carriage return or extra records SHALL be refused. `create`, `start`, `build` and `pull` SHALL NOT be bounded.
 
 #### Scenario: Stalled engine query
 - **WHEN** a read-only engine query does not answer

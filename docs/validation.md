@@ -1330,3 +1330,148 @@ Notes:
 
 The installed launcher core, setup and guard change, so installations rerun
 `--container-setup`.
+
+## Adoption of `sandbox-ref-36`: 2026-11-27
+
+Change `adopt-sandbox-ref-36`, from `sandbox-ref-28` (`ba1ef14`) directly to
+`sandbox-ref-36` (`ce2c9d2`). It takes in `sandbox-ref-29` through
+`sandbox-ref-36` and explicitly excludes `add-read-only-dependency-mirror`
+(whose code landed on `sandbox-container/main` after `sandbox-ref-36`):
+- host Podman delegation is removed in every mode (`OPENCODE_CONTAINER_PODMAN=1`
+  stops startup before engine queries with migration guidance) and replaced by a
+  private, session-owned rootless Podman engine
+  (`localhost/opencode-cli-engine:latest`) whenever the enabled toolchain
+  library holds image toolchains;
+- toolchains are provisioned from the shipped release catalog
+  (`setup/toolchain-catalog/`) and host-side HTTPS archive downloads without
+  maintenance consent, with read-only `.images` storage, idle-engine checks on
+  image removal, Windows drive-path translation, and automatic re-verification
+  during `--container-setup`;
+- the process rlimit fallback is set inside each container by its first process
+  (never `--ulimit nproc`), verified per container across agent, proxy and
+  engine containers;
+- nested systemd containers and explicit nested limits on eligible engines, and
+  `io.containers.capabilities` (`SETUID,SETGID,SYS_CHROOT,CHOWN`) declared on
+  the engine image;
+- guarded terminal availability probing (`tests/guard_terminal_probe.py`) and
+  runtime-test portability updates.
+
+Copied from `sandbox-container` tag `sandbox-ref-36` (commit `ce2c9d2`):
+- updated (29): `launcher/core.sh`, `launcher/windows/bootstrap.sh`,
+  `launcher/windows/core.ps1`, `network/README.md`, `network/agent_budgets.py`,
+  `network/agent_profile.py`, `network/proxy_hardening.py`,
+  `network/qualification_probe.py`, `network/qualification_records.py`,
+  `network/qualify.py`, `network/session.py`, `setup/common.py`,
+  `setup/launch.py`, `setup/setup.py`, `setup/smoke.py`, `setup/toolchains.py`,
+  `tests/fake_podman.py`, `tests/guard_runtime_fixture.py`,
+  `tests/network_fixture.py`, `tests/test_alignment.py`, `tests/test_guard.py`,
+  `tests/test_launcher.py`, `tests/test_network_feasibility.py`,
+  `tests/test_qualification.py`, `tests/test_session.py`, `tests/test_setup.py`,
+  `tests/test_toolchains.py`, `tests/test_windows_bootstrap.py`,
+  `tests/windows/shim_tests.ps1`;
+- added (17): the eight `launcher/engine/` files, `setup/engine.py`, the six
+  `setup/toolchain-catalog/` files, `tests/guard_terminal_probe.py` and
+  `tests/test_engine.py`;
+- removed: none.
+
+The `tests/test_reference_copy.py` manifest moved to `sandbox-ref-36`
+(`ce2c9d28873838a4ac541da34edaf7d8b5264be4`, 92 entries). `opencode-container.ps1`,
+`.gitattributes`, `Containerfile` (OpenCode `1.19.5`, OpenSpec `2.0.0`),
+`.containerignore`, `agent/profile.json`, `agent/launcher.sh` and
+`agent/policies/default.json` are unchanged.
+
+OpenCode-specific updates:
+- `tests/run-runtime.sh`: removed `OPENCODE_CONTAINER_PODMAN_SOCKET`, selecting
+  the Unix socket from `CONTAINER_HOST` or the runtime directory; aligned
+  `--shared` with `tests/test_alignment.py` by adding `test_engine`,
+  `test_toolchains`, `test_windows_bootstrap`, `test_windows_enter` and
+  `test_image_pins`;
+- `tests/test_wrapper.py`: removed the synthetic
+  `OPENCODE_CONTAINER_PODMAN_SOCKET` fixture, stale `OPENCODE_CONTAINER_PODMAN`
+  entry, and duplicate `qualification-input` stub (now provided by
+  `synthetic_install`), keeping all OpenCode hooks, provider sets, YOLO,
+  integrations and policy checks;
+- `tests/test_setup_wrapper.py` and `tests/test_setup_runtime.py`: removed host
+  Podman delegation prompts and summary assertions, isolated `XDG_RUNTIME_DIR`
+  in synthetic setup tests, asserted schema 3 preferences (`schema_version == 3`,
+  `engine_image`, absent `podman` / `delegation_socket`), copied the CA fixture
+  into native storage, routed prepared engine image lookups when present, and
+  tracked disposable `setup-<release>` runtime, engine, toolchain and proxy tags;
+- `tests/test_runtime.py`: removed `test_child_container_host_bind` and legacy
+  delegation branches, updated `test_image_default_host_is_removed` and
+  `test_containerized_caller_with_remapped_socket` to verify absent
+  `CONTAINER_HOST`/`DOCKER_HOST`/host socket and exact
+  `OPENCODE_CONTAINER_PODMAN=1` refusal, added
+  `test_process_rlimit_counts_per_container`, and ported `SessionEngineTests`
+  (6 cases covering workspace binds, caller ownership, read-only store, build/load,
+  per-container rlimit, no-engine mode, concurrent isolation, cgroup delegation
+  and nested systemd containers) while keeping OpenCode's version, YOLO,
+  OpenTUI renderer and state/mount checks;
+- `tests/test_network_runtime.py`: installed `setup/engine.py`, `engine.INPUTS`,
+  `setup/toolchain-catalog/` and the derived engine seccomp profile; replaced
+  delegation checks with exact `OPENCODE_CONTAINER_PODMAN=1` refusal across all
+  modes; added `test_offline_session_engine_has_no_external_path`,
+  `test_image_recipe_check_runs_without_network`, controller-aware agent/proxy
+  budget checks, `test_proxy_starts_beside_containers_holding_more_than_its_budget`,
+  bounded cleanup for interrupted fixtures, and `guard_terminal_probe.py` gating
+  for guarded terminal cases (keeping pipe cases independently runnable and
+  preserving OpenCode's four provider TLS binding checks and synthetic chat-API
+  tool call);
+- `README.md`, `AGENTS.md`, `docs/setup.md`, `docs/network-contract.md` and
+  `openspec/specs/toolchain-library/spec.md` (`## Purpose`): replaced host
+  Podman delegation docs with launch service, session container engine,
+  container tests, shipped catalog, image recipes, Windows drive paths, schema 3
+  migration and in-container process rlimit fallback.
+
+### Working-session checks (2026-11-27)
+
+Environment: guarded sandbox session (`CONTAINER_HOST=tcp://127.0.0.1:2375`,
+rootless Linux `cgroupfs`, kernel `6.6.87.2-microsoft-standard-WSL2`), checkout
+on DrvFS (`/mnt/d/`, mode `777`). Synthetic suites that require private
+executable `0700` storage ran in a disposable offline `localhost/docgen:1.0.0`
+container with private executable `tmpfs` (`SANDBOX_TEST_TMPDIR=/sandbox-test-tmp`).
+Real OpenCode runtime images (`localhost/opencode-cli:latest`,
+`localhost/opencode-guard-toolchain:development`), the engine base image,
+`shellcheck`, `pwsh` and host Unix sockets (blocked with `EPERM` by the session
+guard) are unavailable in this session.
+
+| Check | Result |
+| --- | --- |
+| `python3 -B -m unittest tests.test_reference_copy tests.test_alignment -v` (host Python, git and sibling checkouts present) | Passed: 26 tests, 0 skips |
+| `python3 -B -m unittest tests.test_wrapper -v` (disposable container, private executable `tmpfs`) | Passed: 14 tests |
+| `python3 -B -m unittest tests.test_setup_wrapper -v` (disposable container, private executable `tmpfs`) | Passed: 9 tests |
+| `python3 -B -m unittest tests.test_toolchains tests.test_engine -v` (disposable container, private executable `tmpfs`) | Passed: 87 tests |
+| `python3 -B -m unittest discover -s tests -p 'test_*.py' -v` (disposable `localhost/docgen:1.0.0` container, private executable `tmpfs`) | 590 tests discovered: 497 passed, 90 opt-in real-engine/sibling skips (`test_runtime` 29, `test_network_runtime` 25, `test_guard` 24, `test_qualification` 7, `test_setup_runtime` 2, `test_network_feasibility` 1, `test_launcher` 1, `test_reference_copy` 1); 3 `test_alignment` harness-only failures/errors (`git` absent in `docgen:1.0.0` and temp-dir parent), all 21 `test_alignment` cases passed on host Python above |
+| `bash -n` on all 21 tracked `*.sh` files | Passed |
+| `python3 -B -m py_compile` on updated test modules | Passed |
+| `git diff --check` | Passed |
+| `openspec validate adopt-sandbox-ref-36 --strict` | Passed (0 errors, 0 warnings) |
+| Disposable OpenSpec archive/spec-merge preview (`openspec archive --yes` + `openspec validate --specs` in temp copy) | Passed: `container-podman-access` retired, `session-container-engine` created with 20 requirements, launch-engine verification moved to `container-launcher`, OpenCode contracts preserved, 13/13 specs passed |
+| `python3 -I ../sandbox-container/tools/propagate.py . sandbox-ref-28 sandbox-ref-36 --checklist` | Generated 13-entry checklist (`runtime`/`toolchain` images, engine build, 9 runner modes, Windows manual step) |
+| `bash tests/run-runtime.sh --shared` (preflight check in guarded session) | Failed closed at preflight (exit 125, `socket: operation not permitted` under session guard; `localhost/opencode-cli:latest` absent in session engine) |
+| `bash ../sandbox-container/tools/shellcheck.sh .`, `bash ../sandbox-container/tools/powershell.sh .` | Unavailable in session (`shellcheck` and `pwsh` not installed, no offline tool images in session engine) |
+| Real-engine runner modes (`--shared`, `--setup`, `--setup-runtime`, `--qualification`, `--wrapper`, default, `--network-feasibility`, `--guard`, `--network`) | Unavailable in session (no `localhost/opencode-cli:latest`, no `localhost/opencode-guard-toolchain:development`, no host Unix Podman service) |
+| Authenticated provider checks (`anthropic-api`, `openai-api`, `openrouter-api`, `opencode-zen`) | Not run in session (operator-only; prior `sandbox-ref-28` results remain in history) |
+| Windows PowerShell 5.1 validation | Not run in session (Linux session; post-closure follow-up) |
+
+### Follow-up after closure
+
+- On WSL or the native Linux host, from `sandbox-container`:
+  `bash tools/adoption-run.sh /mnt/d/Workspace/sandboxes/opencode-container sandbox-ref-28 sandbox-ref-36`: pending
+  (prepare `localhost/opencode-cli-engine:latest` and record image IDs,
+  `io.containers.capabilities`, runner suites, and any host-specific skips).
+- On a Windows host, rerun `--container-setup` from PowerShell and run from
+  `sandbox-container`:
+  `.\tools\windows-validate.ps1 -Checkout <the Windows checkout>` on Windows
+  PowerShell 5.1: pending (verify saved-delegation refusal, library-image
+  session with private engine, and interactive OpenTUI).
+- Static ShellCheck and PSScriptAnalyzer/shim checks (`tools/shellcheck.sh` and
+  `tools/powershell.sh` from `sandbox-container`): pending on host with tool
+  images/binaries.
+- Cross-repository parity table synchronization (`sandbox-container` and
+  sibling wrappers): pending as separate parity step after closure.
+
+The installed launcher core, setup, guard and engine recipe change, and setup
+builds `localhost/opencode-cli-engine:latest` and migrates schema 1/2
+preferences to schema 3, so existing installations must rerun
+`--container-setup`.
